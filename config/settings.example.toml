@@ -1,0 +1,22 @@
+app_name = "intelligent-investment-tracker"
+environment = "local"
+debug = false
+
+database_url = "sqlite:///./investment_tracker.db"
+database_echo = false
+
+log_level = "INFO"
+log_dir = "logs"
+log_filename = "app.log"
+log_json = true
+
+ocr_provider = "tesseract"
+ocr_confidence_threshold = 0.8
+
+exchange_rate_cache_ttl_seconds = 900
+
+ai_provider = "deepseek"
+ai_model_name = "deepseek-reasoner"
+ai_temperature = 0.2
+ai_max_tokens = 4000
+

@@ -1,0 +1,42 @@
+[project]
+name = "intelligent-investment-tracker"
+version = "0.1.0"
+description = "Day1 foundation for an intelligent foreign exchange and bond investment tracker."
+readme = "README.md"
+authors = [
+    { name = "nanxi huang", email = "nanxi.huang@xbotspace.com" }
+]
+requires-python = ">=3.9,<3.13"
+dependencies = [
+    "alembic>=1.13.0",
+    "fastapi>=0.115.0",
+    "pydantic-settings>=2.6.0",
+    "python-json-logger>=2.0.7",
+    "sqlalchemy>=1.4,<3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["investment_tracker*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

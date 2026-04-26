@@ -1,0 +1,534 @@
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-sans); }
+
+.header {
+  padding: 1.5rem 1.5rem 1rem;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.week-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+  color: var(--color-text-info);
+  background: var(--color-background-info);
+  padding: 3px 10px; border-radius: 20px; margin-bottom: 8px;
+}
+.header h1 { font-size: 20px; font-weight: 500; color: var(--color-text-primary); }
+.header p { font-size: 13px; color: var(--color-text-secondary); margin-top: 4px; line-height: 1.5; }
+
+.tabs {
+  display: flex; gap: 0;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  padding: 0 1.5rem;
+}
+.tab {
+  font-size: 13px; font-weight: 400; color: var(--color-text-secondary);
+  padding: 10px 14px; cursor: pointer; border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s; white-space: nowrap;
+  background: none; border-top: none; border-left: none; border-right: none;
+}
+.tab:hover { color: var(--color-text-primary); }
+.tab.active { color: var(--color-text-primary); font-weight: 500; border-bottom-color: var(--color-text-primary); }
+
+.content { padding: 1.25rem 1.5rem; }
+
+.section-title {
+  font-size: 11px; font-weight: 500; letter-spacing: 0.07em;
+  color: var(--color-text-tertiary); text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+/* Day cards */
+.days-grid { display: flex; flex-direction: column; gap: 10px; }
+.day-card {
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-lg);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.day-card:hover { border-color: var(--color-border-secondary); }
+.day-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; cursor: pointer;
+}
+.day-num {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 500; flex-shrink: 0;
+}
+.day-num.blue { background: var(--color-background-info); color: var(--color-text-info); }
+.day-num.teal { background: #E1F5EE; color: #0F6E56; }
+.day-num.amber { background: #FAEEDA; color: #854F0B; }
+.day-num.purple { background: #EEEDFE; color: #534AB7; }
+.day-num.coral { background: #FAECE7; color: #993C1D; }
+
+.day-title { font-size: 14px; font-weight: 500; color: var(--color-text-primary); flex: 1; }
+.day-subtitle { font-size: 12px; color: var(--color-text-secondary); }
+.expand-btn { font-size: 12px; color: var(--color-text-tertiary); padding: 2px 6px; }
+.day-body {
+  padding: 0 14px 14px 52px;
+  display: none;
+}
+.day-body.open { display: block; }
+
+.task-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.task-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 13px; color: var(--color-text-secondary); line-height: 1.5;
+}
+.task-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--color-border-secondary); margin-top: 6px; flex-shrink: 0;
+}
+.task-item strong { color: var(--color-text-primary); font-weight: 500; }
+
+.deliverable-box {
+  margin-top: 10px; padding: 10px 12px;
+  background: var(--color-background-secondary);
+  border-radius: var(--border-radius-md);
+  font-size: 12px; color: var(--color-text-secondary); line-height: 1.6;
+}
+.deliverable-box .label {
+  font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
+  color: var(--color-text-tertiary); text-transform: uppercase; margin-bottom: 4px;
+}
+
+/* Architecture diagram */
+.arch-section { display: flex; flex-direction: column; gap: 12px; }
+.arch-card {
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-lg);
+  padding: 14px 16px;
+}
+.arch-card-title {
+  font-size: 13px; font-weight: 500; color: var(--color-text-primary); margin-bottom: 8px;
+  display: flex; align-items: center; gap: 6px;
+}
+.arch-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.arch-dot.blue { background: #378ADD; }
+.arch-dot.teal { background: #1D9E75; }
+.arch-dot.amber { background: #BA7517; }
+.arch-dot.purple { background: #7F77DD; }
+.arch-dot.coral { background: #D85A30; }
+.arch-items { display: flex; flex-wrap: wrap; gap: 6px; }
+.arch-tag {
+  font-size: 12px; padding: 3px 10px;
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: 20px; color: var(--color-text-secondary);
+  background: var(--color-background-secondary);
+}
+.connector-arrow {
+  text-align: center; font-size: 18px; color: var(--color-text-tertiary);
+  margin: -4px 0;
+}
+
+/* Blog tab */
+.blog-section { display: flex; flex-direction: column; gap: 12px; }
+.blog-card {
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-lg);
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.blog-card:hover { border-color: var(--color-border-secondary); }
+.blog-card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.blog-card-title { font-size: 13px; font-weight: 500; color: var(--color-text-primary); line-height: 1.5; flex: 1; }
+.blog-tag {
+  font-size: 11px; padding: 2px 8px; border-radius: 20px; flex-shrink: 0;
+  font-weight: 500; white-space: nowrap;
+}
+.blog-tag.deep { background: #EEEDFE; color: #534AB7; }
+.blog-tag.eng { background: #E1F5EE; color: #0F6E56; }
+.blog-tag.story { background: #FAEEDA; color: #854F0B; }
+.blog-card-desc { font-size: 12px; color: var(--color-text-secondary); margin-top: 6px; line-height: 1.6; }
+.blog-why { font-size: 11px; color: var(--color-text-tertiary); margin-top: 6px; display: flex; align-items: center; gap: 4px; }
+
+/* Goal / Progress tab */
+.goal-section { display: flex; flex-direction: column; gap: 12px; }
+.goal-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-lg);
+  padding: 12px 14px;
+}
+.goal-icon {
+  width: 30px; height: 30px; border-radius: var(--border-radius-md);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; flex-shrink: 0;
+}
+.goal-text-title { font-size: 13px; font-weight: 500; color: var(--color-text-primary); }
+.goal-text-desc { font-size: 12px; color: var(--color-text-secondary); margin-top: 2px; line-height: 1.5; }
+
+.callout {
+  padding: 12px 14px;
+  background: var(--color-background-secondary);
+  border-left: 2px solid var(--color-border-info);
+  border-radius: 0 var(--border-radius-md) var(--border-radius-md) 0;
+  font-size: 13px; color: var(--color-text-secondary); line-height: 1.6;
+}
+.callout strong { color: var(--color-text-primary); font-weight: 500; }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+</style>
+
+<div class="header">
+  <div class="week-badge">第七周 · Week 7</div>
+  <h1>旗舰项目 & 内容输出</h1>
+  <p>将前6周的技术积累整合为一个真实的 GitHub 项目 + 技术博客，这是对空窗期最有力的叙事证明。</p>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('schedule')">每日计划</button>
+  <button class="tab" onclick="switchTab('arch')">项目架构</button>
+  <button class="tab" onclick="switchTab('blog')">博客选题</button>
+  <button class="tab" onclick="switchTab('goals')">产出目标</button>
+</div>
+
+<div class="content">
+
+  <!-- SCHEDULE TAB -->
+  <div id="tab-schedule" class="tab-panel active">
+    <p class="section-title">7天开发计划</p>
+    <div class="days-grid">
+
+      <div class="day-card">
+        <div class="day-header" onclick="toggleDay(this)">
+          <div class="day-num blue">1</div>
+          <div style="flex:1">
+            <div class="day-title">项目设计 & 框架搭建</div>
+            <div class="day-subtitle">定义边界 · 初始化仓库</div>
+          </div>
+          <span class="expand-btn">▾</span>
+        </div>
+        <div class="day-body">
+          <ul class="task-list">
+            <li class="task-item"><div class="task-dot"></div><div><strong>确定项目主题</strong>：一个融合 MCP + Skills + 推理模型的 AI Agent（见架构 Tab）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>初始化 GitHub 仓库</strong>：README、项目结构、CI 配置（GitHub Actions）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>技术选型确认</strong>：Python / FastAPI + Claude API + MCP Server</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>写项目设计文档</strong>：架构图、模块划分、接口定义（直接写进 README）</div></li>
+          </ul>
+          <div class="deliverable-box">
+            <div class="label">Day 1 产出</div>
+            公开可访问的 GitHub 仓库 + 架构图 + README 初稿
+          </div>
+        </div>
+      </div>
+
+      <div class="day-card">
+        <div class="day-header" onclick="toggleDay(this)">
+          <div class="day-num teal">2</div>
+          <div style="flex:1">
+            <div class="day-title">MCP Server 实现</div>
+            <div class="day-subtitle">核心工具层 · Week 5 知识复用</div>
+          </div>
+          <span class="expand-btn">▾</span>
+        </div>
+        <div class="day-body">
+          <ul class="task-list">
+            <li class="task-item"><div class="task-dot"></div><div><strong>实现 MCP Server</strong>：用 Python SDK 暴露 2–3 个核心工具（文件读写、API 查询、代码执行）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>工具调用稳定性</strong>：加入重试逻辑、错误处理、工具调用日志（对应 Week 5 可靠性工程）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>本地测试</strong>：用 Claude Desktop 或命令行验证 MCP 工具可被正确调用</div></li>
+          </ul>
+          <div class="deliverable-box">
+            <div class="label">Day 2 产出</div>
+            可运行的 MCP Server，至少 2 个工具经过测试
+          </div>
+        </div>
+      </div>
+
+      <div class="day-card">
+        <div class="day-header" onclick="toggleDay(this)">
+          <div class="day-num amber">3</div>
+          <div style="flex:1">
+            <div class="day-title">推理模型集成</div>
+            <div class="day-subtitle">o1 / R1 应用工程 · Week 6 实战</div>
+          </div>
+          <span class="expand-btn">▾</span>
+        </div>
+        <div class="day-body">
+          <ul class="task-list">
+            <li class="task-item"><div class="task-dot"></div><div><strong>集成推理模型</strong>：在复杂规划任务上调用 DeepSeek-R1 或 Claude（开启 extended thinking）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>CoT 链路设计</strong>：如何截取/展示推理过程，控制思考深度（budget tokens）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>长上下文管理</strong>：实现对话历史压缩策略（摘要 + 滚动窗口）</div></li>
+          </ul>
+          <div class="deliverable-box">
+            <div class="label">Day 3 产出</div>
+            Agent 可调用推理模型完成一个完整的多步骤任务
+          </div>
+        </div>
+      </div>
+
+      <div class="day-card">
+        <div class="day-header" onclick="toggleDay(this)">
+          <div class="day-num purple">4</div>
+          <div style="flex:1">
+            <div class="day-title">Skills 复用体系 & 评测</div>
+            <div class="day-subtitle">可控性工程 · Week 6 评测体系落地</div>
+          </div>
+          <span class="expand-btn">▾</span>
+        </div>
+        <div class="day-body">
+          <ul class="task-list">
+            <li class="task-item"><div class="task-dot"></div><div><strong>抽象 Skills 层</strong>：将常用 prompt 封装成可复用的 Skills 模块（参数化、版本化）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>写评测用例</strong>：至少 10 个测试用例，覆盖正常路径 + 边界情况</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>自动化评测</strong>：用 LLM-as-Judge 或规则匹配对输出打分，输出评测报告</div></li>
+          </ul>
+          <div class="deliverable-box">
+            <div class="label">Day 4 产出</div>
+            可运行的评测脚本 + 初版评测报告（JSON or Markdown）
+          </div>
+        </div>
+      </div>
+
+      <div class="day-card">
+        <div class="day-header" onclick="toggleDay(this)">
+          <div class="day-num coral">5</div>
+          <div style="flex:1">
+            <div class="day-title">打磨 & Demo 制作</div>
+            <div class="day-subtitle">面试可展示的完整闭环</div>
+          </div>
+          <span class="expand-btn">▾</span>
+        </div>
+        <div class="day-body">
+          <ul class="task-list">
+            <li class="task-item"><div class="task-dot"></div><div><strong>端到端联调</strong>：确保完整流程无阻断（MCP 工具 → Agent → 推理模型 → 输出）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>制作 Demo</strong>：录制 GIF 或视频演示核心功能，放进 README</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>完善文档</strong>：Quick Start、架构说明、关键设计决策（写给面试官看的）</div></li>
+          </ul>
+          <div class="deliverable-box">
+            <div class="label">Day 5 产出</div>
+            可一键 clone & run 的项目 + Demo 视频/GIF
+          </div>
+        </div>
+      </div>
+
+      <div class="day-card">
+        <div class="day-header" onclick="toggleDay(this)">
+          <div class="day-num blue">6</div>
+          <div style="flex:1">
+            <div class="day-title">第一篇技术博客</div>
+            <div class="day-subtitle">写作 = 整理认知 + 填补空窗叙事</div>
+          </div>
+          <span class="expand-btn">▾</span>
+        </div>
+        <div class="day-body">
+          <ul class="task-list">
+            <li class="task-item"><div class="task-dot"></div><div><strong>选题</strong>：从博客 Tab 中选一个（建议首篇选「MCP 实践类」，技术干货多、可搜索）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>结构先行</strong>：列大纲（背景 → 核心问题 → 解法 → 代码 → 总结）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>完成初稿</strong>：3000 字左右，配架构图或代码片段，发布到掘金/公众号</div></li>
+          </ul>
+          <div class="deliverable-box">
+            <div class="label">Day 6 产出</div>
+            已发布的第一篇技术博客（有公开 URL 可以放简历）
+          </div>
+        </div>
+      </div>
+
+      <div class="day-card">
+        <div class="day-header" onclick="toggleDay(this)">
+          <div class="day-num teal">7</div>
+          <div style="flex:1">
+            <div class="day-title">周复盘 & Week 8 预热</div>
+            <div class="day-subtitle">整理认知 · 准备面试冲刺</div>
+          </div>
+          <span class="expand-btn">▾</span>
+        </div>
+        <div class="day-body">
+          <ul class="task-list">
+            <li class="task-item"><div class="task-dot"></div><div><strong>项目 Star & 公开</strong>：检查仓库是否对外可见、是否有 License</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>简历更新</strong>：将项目写进简历（突出 MCP + 推理模型 + 评测体系三个关键词）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>面试口径演练</strong>：用 2 分钟讲清楚这个项目（参考 STAR 法则）</div></li>
+            <li class="task-item"><div class="task-dot"></div><div><strong>Week 8 计划确认</strong>：梳理高频系统设计题 + 空窗期叙事框架</div></li>
+          </ul>
+          <div class="deliverable-box">
+            <div class="label">Day 7 产出</div>
+            更新后的简历 + 2 分钟项目口述脚本
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ARCH TAB -->
+  <div id="tab-arch" class="tab-panel">
+    <p class="section-title">推荐项目：智能代码审查 Agent</p>
+    <div class="callout" style="margin-bottom:14px">
+      <strong>项目定位</strong>：给定一个 GitHub PR，Agent 自动调用工具分析代码变更，用推理模型深度思考潜在问题，输出结构化审查报告。—— 恰好覆盖 MCP + Skills + 推理模型三个核心模块。
+    </div>
+    <div class="arch-section">
+      <div class="arch-card">
+        <div class="arch-card-title"><div class="arch-dot blue"></div>用户接入层</div>
+        <div class="arch-items">
+          <span class="arch-tag">CLI 命令行</span>
+          <span class="arch-tag">GitHub Webhook（可选）</span>
+          <span class="arch-tag">FastAPI REST</span>
+        </div>
+      </div>
+      <div class="connector-arrow">↓</div>
+      <div class="arch-card">
+        <div class="arch-card-title"><div class="arch-dot purple"></div>Agent 调度层</div>
+        <div class="arch-items">
+          <span class="arch-tag">任务规划（推理模型）</span>
+          <span class="arch-tag">工具选择</span>
+          <span class="arch-tag">上下文管理</span>
+          <span class="arch-tag">Skills 路由</span>
+        </div>
+      </div>
+      <div class="connector-arrow">↓</div>
+      <div class="arch-card">
+        <div class="arch-card-title"><div class="arch-dot teal"></div>MCP 工具层</div>
+        <div class="arch-items">
+          <span class="arch-tag">fetch_pr_diff</span>
+          <span class="arch-tag">run_static_analysis</span>
+          <span class="arch-tag">search_codebase</span>
+          <span class="arch-tag">post_review_comment</span>
+        </div>
+      </div>
+      <div class="connector-arrow">↓</div>
+      <div class="arch-card">
+        <div class="arch-card-title"><div class="arch-dot amber"></div>推理 & Skills 层</div>
+        <div class="arch-items">
+          <span class="arch-tag">DeepSeek-R1 / Claude Sonnet</span>
+          <span class="arch-tag">code_review_skill</span>
+          <span class="arch-tag">security_check_skill</span>
+          <span class="arch-tag">CoT 截取</span>
+        </div>
+      </div>
+      <div class="connector-arrow">↓</div>
+      <div class="arch-card">
+        <div class="arch-card-title"><div class="arch-dot coral"></div>评测 & 可观测层</div>
+        <div class="arch-items">
+          <span class="arch-tag">LLM-as-Judge 评分</span>
+          <span class="arch-tag">工具调用日志</span>
+          <span class="arch-tag">延迟 & token 监控</span>
+        </div>
+      </div>
+    </div>
+    <div class="callout" style="margin-top:14px">
+      不喜欢这个方向？其他可选主题：<strong>个人知识库 QA Agent</strong>（MCP 读文件 + RAG + 推理）、<strong>多工具数据分析 Agent</strong>（MCP 查数据库 + 画图 + 推理解读）。核心原则：三层都要有。
+    </div>
+  </div>
+
+  <!-- BLOG TAB -->
+  <div id="tab-blog" class="tab-panel">
+    <p class="section-title">推荐博客选题（按优先级排序）</p>
+    <div class="blog-section">
+
+      <div class="blog-card" onclick="sendPrompt('帮我写这篇博客的详细大纲：从零实现一个 MCP Server：工具调用稳定性工程实践')">
+        <div class="blog-card-header">
+          <div class="blog-card-title">从零实现一个 MCP Server：工具调用稳定性工程实践</div>
+          <span class="blog-tag eng">工程实践</span>
+        </div>
+        <div class="blog-card-desc">用本项目的 MCP Server 为例，讲清楚协议设计、工具注册、错误处理、重试机制。这类文章搜索流量高，展示 Week 5 深度。</div>
+        <div class="blog-why">↗ 点击让 Claude 帮你写大纲</div>
+      </div>
+
+      <div class="blog-card" onclick="sendPrompt('帮我写这篇博客的详细大纲：DeepSeek-R1 实战：如何在 Agent 中工程化地使用推理模型')">
+        <div class="blog-card-header">
+          <div class="blog-card-title">DeepSeek-R1 实战：如何在 Agent 中工程化地使用推理模型</div>
+          <span class="blog-tag deep">技术深度</span>
+        </div>
+        <div class="blog-card-desc">从 Week 4 的 GRPO/R1 原理出发，落地到实际工程：什么时候调推理模型、budget tokens 怎么设、CoT 如何截取利用。</div>
+        <div class="blog-why">↗ 点击让 Claude 帮你写大纲</div>
+      </div>
+
+      <div class="blog-card" onclick="sendPrompt('帮我写这篇博客的详细大纲：Agent 评测体系从 0 到 1：我是如何给 AI Agent 写测试的')">
+        <div class="blog-card-header">
+          <div class="blog-card-title">Agent 评测体系从 0 到 1：我是如何给 AI Agent 写测试的</div>
+          <span class="blog-tag eng">工程实践</span>
+        </div>
+        <div class="blog-card-desc">Week 6 的核心产出。测试用例设计、LLM-as-Judge 原理与避坑、自动化评测报告。这个话题在国内几乎没有人系统写过。</div>
+        <div class="blog-why">↗ 点击让 Claude 帮你写大纲</div>
+      </div>
+
+      <div class="blog-card" onclick="sendPrompt('帮我写这篇博客的详细大纲：我如何在离职15个月后重回算法工程师赛道：一份系统学习路线回顾')">
+        <div class="blog-card-header">
+          <div class="blog-card-title">我如何在离职 15 个月后重回算法工程师赛道：系统学习路线回顾</div>
+          <span class="blog-tag story">职业叙事</span>
+        </div>
+        <div class="blog-card-desc">Week 8 前可以先起草，Week 8 结束后发布。直接回答面试官的隐性问题，主动设计空窗期叙事。话题有个人温度，容易传播。</div>
+        <div class="blog-why">↗ 点击让 Claude 帮你写大纲</div>
+      </div>
+
+      <div class="blog-card" onclick="sendPrompt('帮我写这篇博客的详细大纲：2025年 Agent 工程全景：MCP、Skills、推理模型如何协作')">
+        <div class="blog-card-header">
+          <div class="blog-card-title">2025 年 Agent 工程全景：MCP、Skills、推理模型如何协作</div>
+          <span class="blog-tag deep">技术深度</span>
+        </div>
+        <div class="blog-card-desc">综述类文章，适合在项目做完后总结。展示你对整个技术栈的系统认知，正好对应计划里的「技术雷达」视角。</div>
+        <div class="blog-why">↗ 点击让 Claude 帮你写大纲</div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- GOALS TAB -->
+  <div id="tab-goals" class="tab-panel">
+    <p class="section-title">Week 7 结束时的验收标准</p>
+    <div class="goal-section">
+      <div class="goal-row">
+        <div class="goal-icon" style="background:#E6F1FB">🐙</div>
+        <div>
+          <div class="goal-text-title">GitHub 仓库：公开可访问</div>
+          <div class="goal-text-desc">有 README（含架构图 + Demo）、清晰的目录结构、可运行的 Quick Start。面试官打开 10 秒内能看懂这个项目在做什么。</div>
+        </div>
+      </div>
+      <div class="goal-row">
+        <div class="goal-icon" style="background:#E1F5EE">🔧</div>
+        <div>
+          <div class="goal-text-title">MCP Server：至少 2 个真实工具</div>
+          <div class="goal-text-desc">不是 Hello World 级别的 demo，而是在项目中实际被调用、有错误处理、有日志的生产级工具。</div>
+        </div>
+      </div>
+      <div class="goal-row">
+        <div class="goal-icon" style="background:#EEEDFE">🧠</div>
+        <div>
+          <div class="goal-text-title">推理模型集成：有具体的工程决策</div>
+          <div class="goal-text-desc">能回答「为什么这里用推理模型而不是普通模型」「budget tokens 怎么选的」—— 有工程判断，不只是 API 调用。</div>
+        </div>
+      </div>
+      <div class="goal-row">
+        <div class="goal-icon" style="background:#EAF3DE">📊</div>
+        <div>
+          <div class="goal-text-title">评测报告：量化质量</div>
+          <div class="goal-text-desc">10 个以上测试用例，有通过率、失败案例分析。能在面试中说「我的评测结果显示 X% 的任务成功率」。</div>
+        </div>
+      </div>
+      <div class="goal-row">
+        <div class="goal-icon" style="background:#FAEEDA">✍️</div>
+        <div>
+          <div class="goal-text-title">技术博客：至少 1 篇已发布</div>
+          <div class="goal-text-desc">有公开 URL，放进简历或 GitHub Profile。写作本身就是对空窗期最好的交代。</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:14px">
+      <strong>面试口径（现在就可以背）：</strong>「离开上一家公司后，我系统梳理了 2025 年 Agent 工程的演进，重点研究了 MCP 协议落地和推理模型的应用工程化，并独立做了〔项目名〕——一个融合 MCP Server、Skills 复用体系和 DeepSeek-R1 推理能力的 Agent 系统，配套写了评测框架和技术博客。」
+    </div>
+  </div>
+
+</div>
+
+<script>
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+function toggleDay(header) {
+  const body = header.nextElementSibling;
+  const btn = header.querySelector('.expand-btn');
+  const isOpen = body.classList.toggle('open');
+  btn.textContent = isOpen ? '▴' : '▾';
+}
+</script>
