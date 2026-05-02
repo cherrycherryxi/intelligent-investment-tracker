@@ -1,0 +1,22 @@
+:root {
+  font-family: "IBM Plex Sans", "Noto Sans SC", sans-serif;
+  color: #17212b;
+  background:
+    radial-gradient(circle at top left, rgba(15, 93, 70, 0.14), transparent 30%),
+    linear-gradient(180deg, #faf8f2 0%, #f3efe6 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+}

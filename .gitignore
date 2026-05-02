@@ -10,8 +10,12 @@ __pycache__/
 *.sqlite
 *.sqlite3
 logs/
+backups/
 dist/
 build/
+frontend/node_modules/
+frontend/dist/
 *.egg-info/
 src/*.egg-info/
 .DS_Store
+~$*.xlsx

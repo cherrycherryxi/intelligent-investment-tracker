@@ -19,4 +19,4 @@ ai_provider = "deepseek"
 ai_model_name = "deepseek-reasoner"
 ai_temperature = 0.2
 ai_max_tokens = 4000
-
+ai_request_timeout_seconds = 90

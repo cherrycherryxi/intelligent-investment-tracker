@@ -52,6 +52,7 @@ _load_dotenv_into_environ(Path(".env"))
 _normalize_boolean_env("DEBUG")
 _normalize_boolean_env("DATABASE_ECHO")
 _normalize_boolean_env("LOG_JSON", default="true")
+_normalize_boolean_env("BACKUP_ENABLED", default="true")
 
 
 class AppSettings(BaseSettings):
@@ -70,6 +71,8 @@ class AppSettings(BaseSettings):
     log_dir: str = "logs"
     log_filename: str = "app.log"
     log_json: bool = True
+    backup_enabled: bool = True
+    backup_dir: str = "backups"
 
     ocr_provider: Literal["tesseract", "baidu", "tencent"] = "tesseract"
     ocr_confidence_threshold: float = 0.8
@@ -86,9 +89,10 @@ class AppSettings(BaseSettings):
     ai_model_name: str = "deepseek-reasoner"
     ai_temperature: float = 0.2
     ai_max_tokens: int = 4000
+    ai_request_timeout_seconds: float = 90.0
     ai_api_key: Optional[str] = None
 
-    @field_validator("debug", "database_echo", "log_json", mode="before")
+    @field_validator("debug", "database_echo", "log_json", "backup_enabled", mode="before")
     @classmethod
     def normalize_bool_values(cls, value):  # type: ignore[no-untyped-def]
         if isinstance(value, bool) or value is None:
@@ -108,6 +112,13 @@ class AppSettings(BaseSettings):
             raise ValueError("database_url must not be empty")
         return value
 
+    @field_validator("backup_dir")
+    @classmethod
+    def validate_backup_dir(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("backup_dir must not be empty")
+        return value
+
     @field_validator("ocr_confidence_threshold")
     @classmethod
     def validate_ocr_confidence_threshold(cls, value: float) -> float:
@@ -120,6 +131,13 @@ class AppSettings(BaseSettings):
     def validate_ai_temperature(cls, value: float) -> float:
         if not 0 <= value <= 2:
             raise ValueError("ai_temperature must be between 0 and 2")
+        return value
+
+    @field_validator("ai_request_timeout_seconds")
+    @classmethod
+    def validate_ai_request_timeout_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("ai_request_timeout_seconds must be greater than 0")
         return value
 
 

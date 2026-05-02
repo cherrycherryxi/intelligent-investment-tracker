@@ -1,0 +1,79 @@
+[
+  {
+    "name": "ocr_forex_case",
+    "type": "ocr",
+    "input": "招商银行 外汇买入 币种: 美元 数量: 1000 价格: 7.23 交易时间: 2026-04-26 10:30:00",
+    "expected_asset_code": "USD"
+  },
+  {
+    "name": "ocr_bond_case",
+    "type": "ocr",
+    "input": "招商银行 柜台债 买入 债券代码: 123456 数量: 10 价格: 99.8 交易时间: 2026-04-26 10:30:00",
+    "expected_asset_code": "123456"
+  },
+  {
+    "name": "nlp_forex_cn",
+    "type": "nlp",
+    "input": "买入1000美元，汇率7.23，时间2026-04-26 10:30:00",
+    "expected_asset_code": "USD"
+  },
+  {
+    "name": "nlp_forex_en",
+    "type": "nlp",
+    "input": "Buy 500 USD at rate 7.10 on 2026-04-26 09:00:00",
+    "expected_asset_code": "USD"
+  },
+  {
+    "name": "position_case",
+    "type": "position",
+    "input": {
+      "transactions": [
+        {"asset_type": "FOREX", "asset_code": "USD", "direction": "BUY", "quantity": "1000", "unit_price": "7.20", "trade_currency": "CNY"},
+        {"asset_type": "FOREX", "asset_code": "USD", "direction": "BUY", "quantity": "500", "unit_price": "7.50", "trade_currency": "CNY"}
+      ],
+      "current_price": "7.40"
+    },
+    "expected_asset_code": "USD"
+  },
+  {
+    "name": "advice_case",
+    "type": "advice",
+    "input": {
+      "positions": [
+        {"asset_type": "FOREX", "asset_code": "USD", "quantity": 1000, "average_cost_cny": 7.2, "current_value_cny": 7300, "unrealized_pnl_cny": 100, "return_pct": 1.39}
+      ],
+      "risk_preference": "balanced"
+    },
+    "expected_asset_code": "USD"
+  },
+  {
+    "name": "transaction_analysis_case",
+    "type": "analysis",
+    "input": [
+      {"asset_code": "USD", "direction": "BUY", "quantity": 1000},
+      {"asset_code": "USD", "direction": "SELL", "quantity": 200}
+    ],
+    "expected_asset_code": "USD"
+  },
+  {
+    "name": "risk_case",
+    "type": "risk",
+    "input": {
+      "positions": [{"asset_code": "USD", "current_value_cny": 7300}],
+      "volatility_data": {"USD": 0.12}
+    },
+    "expected_asset_code": "USD"
+  },
+  {
+    "name": "ocr_missing_case",
+    "type": "ocr",
+    "input": "招商银行 美元 买入",
+    "expected_asset_code": "USD"
+  },
+  {
+    "name": "nlp_missing_case",
+    "type": "nlp",
+    "input": "买入美元",
+    "expected_asset_code": "USD"
+  }
+]
