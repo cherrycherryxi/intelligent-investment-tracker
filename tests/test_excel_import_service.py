@@ -35,14 +35,14 @@ class StubWorkbookReader:
 def test_excel_import_preview_builds_ready_pending_and_failed_groups() -> None:
     workbook_bytes = Path("investment_tracker_v5.xlsx").read_bytes()
 
-    result = ExcelImportPreviewService().preview_forex_transactions(
+    result = ExcelImportPreviewService(exchange_rate_tool=StubExchangeRateTool()).preview_forex_transactions(
         workbook_bytes,
         source_name="investment_tracker_v5.xlsx",
     )
 
     assert result["summary"]["total_rows"] > 100
     assert result["summary"]["ready_count"] >= 1
-    assert result["summary"]["pending_count"] >= 1
+    assert result["summary"]["failed_count"] >= 1
     first_ready = result["ready_to_import"][0]
     assert first_ready.get("transaction") or first_ready.get("portfolio_event")
 
@@ -50,11 +50,12 @@ def test_excel_import_preview_builds_ready_pending_and_failed_groups() -> None:
 class StubExchangeRateTool:
     def execute(self, payload):
         base_currency = payload["base_currency"]
-        if base_currency == "USD":
+        rates = {"USD": 7.23, "CAD": 5.2, "AUD": 4.68}
+        if base_currency in rates:
             return {
                 "ok": True,
                 "result": {
-                    "rate": 7.23,
+                    "rate": rates[base_currency],
                     "rate_timestamp": "2026-04-30T00:00:00+00:00",
                     "is_estimated": False,
                     "source": "PRIMARY",
@@ -63,8 +64,21 @@ class StubExchangeRateTool:
         return {"ok": False, "error": {"message": "missing"}}
 
 
+class EstimatedExchangeRateTool:
+    def execute(self, payload):
+        return {
+            "ok": True,
+            "result": {
+                "rate": 7.13,
+                "rate_timestamp": "2025-09-18T00:00:00",
+                "is_estimated": True,
+                "source": "FALLBACK",
+            },
+        }
+
+
 def test_excel_import_cross_currency_builds_swap_event_without_cny_estimate() -> None:
-    service = ExcelImportPreviewService(exchange_rate_tool=StubExchangeRateTool())
+    service = ExcelImportPreviewService(exchange_rate_tool=StubExchangeRateTool(), enrich_asset_rates=True)
 
     result = service._build_row_preview(
         row_number=2,
@@ -91,10 +105,11 @@ def test_excel_import_cross_currency_builds_swap_event_without_cny_estimate() ->
     assert result.portfolio_event["cash_entries"][1]["currency"] == "USD"
     assert result.portfolio_event["cash_entries"][1]["amount_delta"] == 336.58
     assert result.portfolio_event["cash_entries"][0]["rmb_amount"] is None
+    assert result.portfolio_event["cash_entries"][1]["fx_rate_to_cny"] == 7.23
 
 
 def test_excel_import_builds_v02_events_for_fund_wealth_interest_and_term_rows() -> None:
-    service = ExcelImportPreviewService()
+    service = ExcelImportPreviewService(exchange_rate_tool=StubExchangeRateTool(), enrich_asset_rates=True)
 
     fund = service._build_row_preview(
         row_number=1,
@@ -155,18 +170,65 @@ def test_excel_import_builds_v02_events_for_fund_wealth_interest_and_term_rows()
 
     assert fund.portfolio_event["event_type"] == EventType.FUND_BUY.value
     assert fund.portfolio_event["asset_entries"][0]["asset"]["asset_type"] == AssetType.FUND.value
+    assert fund.portfolio_event["asset_entries"][0]["fx_rate_to_cny"] is not None
     assert wealth.portfolio_event["event_type"] == EventType.WEALTH_REDEEM.value
     assert wealth.portfolio_event["asset_entries"][0]["asset"]["asset_type"] == AssetType.WEALTH_PRODUCT.value
+    assert wealth.portfolio_event["asset_entries"][0]["fx_rate_to_cny"] is not None
     assert interest.portfolio_event["event_type"] == EventType.INTEREST_INCOME.value
     assert interest.portfolio_event["cash_entries"][0]["amount_delta"] == 0.01
-    assert term.portfolio_event["event_type"] == EventType.WEALTH_INCOME.value
+    assert term.portfolio_event["event_type"] == EventType.WEALTH_REDEEM.value
+    assert term.portfolio_event["asset_entries"][0]["asset"]["asset_type"] == AssetType.WEALTH_PRODUCT.value
+    assert term.portfolio_event["asset_entries"][0]["asset"]["asset_code"] == "WEAL-C568017C415A"
+    assert term.portfolio_event["asset_entries"][0]["quantity_delta"] == -2000.02
     assert term.portfolio_event["cash_entries"][0]["currency"] == "CAD"
+
+
+def test_excel_import_treats_wealth_named_rows_as_wealth_even_when_category_is_fund() -> None:
+    service = ExcelImportPreviewService(exchange_rate_tool=StubExchangeRateTool())
+    name = "招银理财澳元每日金（QDII）1号"
+
+    original_wealth = service._build_row_preview(
+        row_number=1,
+        row={
+            "交易ID": "WM032",
+            "交易时间": "2024-12-27 00:51:00",
+            "类别": "理财",
+            "名称": name,
+            "卖出货币": "AUD",
+            "卖出金额": 1000,
+            "买入货币": None,
+            "买入金额": None,
+            "备注": "理财支出",
+        },
+    )
+    mislabeled_fund = service._build_row_preview(
+        row_number=2,
+        row={
+            "交易ID": "FUND041",
+            "交易时间": "2025-09-12 17:50:00",
+            "类别": "基金",
+            "名称": name,
+            "卖出货币": None,
+            "卖出金额": None,
+            "买入货币": "AUD",
+            "买入金额": 611.36,
+            "备注": "基金收入",
+        },
+    )
+
+    wealth_asset = original_wealth.portfolio_event["asset_entries"][0]["asset"]
+    fund_asset = mislabeled_fund.portfolio_event["asset_entries"][0]["asset"]
+    assert original_wealth.portfolio_event["event_type"] == EventType.WEALTH_BUY.value
+    assert mislabeled_fund.portfolio_event["event_type"] == EventType.WEALTH_REDEEM.value
+    assert wealth_asset["asset_type"] == AssetType.WEALTH_PRODUCT.value
+    assert fund_asset["asset_type"] == AssetType.WEALTH_PRODUCT.value
+    assert wealth_asset["asset_code"] == fund_asset["asset_code"]
 
 
 def test_excel_confirm_import_skips_existing_semantic_duplicates() -> None:
     session = _session()
     repo = TransactionRepository(session)
-    service = ExcelImportPreviewService(workbook_reader=StubWorkbookReader())
+    service = ExcelImportPreviewService(workbook_reader=StubWorkbookReader(), exchange_rate_tool=StubExchangeRateTool())
 
     first = service.import_forex_transactions(
         b"stub",
@@ -187,3 +249,72 @@ def test_excel_confirm_import_skips_existing_semantic_duplicates() -> None:
     assert second["imported_count"] == 0
     assert second["imported_event_count"] == 0
     assert second["skipped_duplicate_count"] == 2
+
+
+def test_excel_import_missing_cny_amount_uses_primary_historical_rate() -> None:
+    service = ExcelImportPreviewService(exchange_rate_tool=StubExchangeRateTool(), fill_missing_cny=True, enrich_asset_rates=True)
+
+    result = service._build_row_preview(
+        row_number=1,
+        row={
+            "交易ID": "FX264",
+            "交易时间": "2026-04-02 12:15:30",
+            "类别": "外汇",
+            "名称": "外汇",
+            "卖出货币": "CNY",
+            "卖出金额": None,
+            "买入货币": "USD",
+            "买入金额": 50,
+            "备注": "卖CNY买USD",
+        },
+    )
+
+    assert result.errors == []
+    assert result.transaction["unit_price"] == 7.23
+    assert result.transaction["total_cost_cny"] == 361.5
+    assert result.transaction["status"] == "PENDING"
+
+
+def test_excel_import_missing_cny_amount_rejects_estimated_fallback_rate() -> None:
+    service = ExcelImportPreviewService(exchange_rate_tool=EstimatedExchangeRateTool(), fill_missing_cny=True)
+
+    result = service._build_row_preview(
+        row_number=1,
+        row={
+            "交易ID": "FX264",
+            "交易时间": "2026-04-02 12:15:30",
+            "类别": "外汇",
+            "名称": "外汇",
+            "卖出货币": "CNY",
+            "卖出金额": None,
+            "买入货币": "USD",
+            "买入金额": 50,
+            "备注": "卖CNY买USD",
+        },
+    )
+
+    assert "USD/CNY 缺少可用的交易日实时历史汇率" in result.errors
+    assert "缺少必要字段: total_cost_cny" in result.errors
+    assert result.transaction["total_cost_cny"] is None
+
+
+def test_excel_import_preview_does_not_block_on_missing_cny_amount_lookup() -> None:
+    service = ExcelImportPreviewService(exchange_rate_tool=EstimatedExchangeRateTool())
+
+    result = service._build_row_preview(
+        row_number=1,
+        row={
+            "交易ID": "FX264",
+            "交易时间": "2026-04-02 12:15:30",
+            "类别": "外汇",
+            "名称": "外汇",
+            "卖出货币": "CNY",
+            "卖出金额": None,
+            "买入货币": "USD",
+            "买入金额": 50,
+            "备注": "卖CNY买USD",
+        },
+    )
+
+    assert "源表缺少 CNY 卖出金额" in result.warnings
+    assert "缺少必要字段: total_cost_cny" in result.errors

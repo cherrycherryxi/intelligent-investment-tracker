@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+import json
 from time import sleep
 from typing import Any, Dict, Optional, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from pydantic import BaseModel
 
@@ -84,6 +88,106 @@ class StaticExchangeRateProvider(ExchangeRateProvider):
         )
 
 
+class FrankfurterExchangeRateProvider(ExchangeRateProvider):
+    """Fetch latest or historical FX rates from the public Frankfurter API."""
+
+    provider_name = "frankfurter"
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "https://api.frankfurter.dev/v2/rates",
+        timeout_seconds: float = 5.0,
+        opener=urlopen,
+        source_label: str = "PRIMARY",
+    ) -> None:
+        self.base_url = base_url
+        self.timeout_seconds = timeout_seconds
+        self.opener = opener
+        self.source_label = source_label
+
+    def fetch(
+        self,
+        *,
+        base_currency: str,
+        quote_currency: str,
+        target_timestamp: Optional[datetime],
+    ) -> ExchangeRateRecord:
+        target_day = target_timestamp.date() if target_timestamp else None
+        query = {
+            "base": base_currency.upper(),
+            "quotes": quote_currency.upper(),
+        }
+        if target_day is not None:
+            query["date"] = target_day.isoformat()
+        url = f"{self.base_url}?{urlencode(query)}"
+
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "investment-assistant/0.1",
+            },
+        )
+        try:
+            with self.opener(request, timeout=self.timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise ToolExecutionError(
+                f"exchange-rate provider rejected request: {exc.code}",
+                code="exchange_rate_http_error",
+                retryable=500 <= exc.code < 600,
+            ) from exc
+        except (OSError, URLError, TimeoutError, ValueError) as exc:
+            raise ToolExecutionError(
+                "exchange-rate provider request failed",
+                code="exchange_rate_provider_unavailable",
+                retryable=True,
+            ) from exc
+
+        quote = quote_currency.upper()
+        parsed_rate, response_day_text = self._parse_payload(payload, quote_currency=quote)
+        if parsed_rate is None:
+            raise ToolExecutionError(
+                "currency pair not available in provider",
+                code="currency_pair_not_found",
+                retryable=False,
+            )
+
+        try:
+            response_day = date.fromisoformat(response_day_text) if response_day_text else (target_day or datetime.utcnow().date())
+        except ValueError as exc:
+            raise ToolExecutionError(
+                "exchange-rate provider returned invalid date",
+                code="exchange_rate_invalid_response",
+                retryable=True,
+            ) from exc
+
+        return ExchangeRateRecord(
+            rate=parsed_rate,
+            rate_timestamp=datetime.combine(response_day, datetime.min.time()),
+            is_estimated=target_day is not None and response_day != target_day,
+            source=self.source_label,
+        )
+
+    def _parse_payload(self, payload: Any, *, quote_currency: str) -> tuple[Optional[float], Optional[str]]:
+        if isinstance(payload, dict):
+            rates = payload.get("rates") or {}
+            rate = rates.get(quote_currency)
+            return (float(rate), payload.get("date")) if rate is not None else (None, payload.get("date"))
+
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("quote", "")).upper() != quote_currency:
+                    continue
+                rate = item.get("rate")
+                return (float(rate), item.get("date")) if rate is not None else (None, item.get("date"))
+
+        return None, None
+
+
 class ExchangeRateToolInput(BaseModel):
     base_currency: str
     quote_currency: str = "CNY"
@@ -103,7 +207,7 @@ class ExchangeRateTool(MCPTool):
         max_retries: int = 3,
         retry_interval_seconds: float = 0.0,
     ) -> None:
-        default_primary = StaticExchangeRateProvider(
+        default_fallback = StaticExchangeRateProvider(
             {
                 ("USD", "CNY"): {
                     date(2022, 1, 1): 6.36,
@@ -168,18 +272,9 @@ class ExchangeRateTool(MCPTool):
                     date(2026, 4, 26): 5.57,
                 },
             },
-            "PRIMARY",
-        )
-        default_fallback = StaticExchangeRateProvider(
-            {
-                ("USD", "CNY"): {
-                    date(2026, 4, 24): 7.19,
-                    date(2026, 4, 25): 7.20,
-                }
-            },
             "FALLBACK",
         )
-        self.primary_provider = primary_provider or default_primary
+        self.primary_provider = primary_provider or FrankfurterExchangeRateProvider()
         self.fallback_provider = fallback_provider or default_fallback
         self.max_retries = max_retries
         self.retry_interval_seconds = retry_interval_seconds

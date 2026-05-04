@@ -35,9 +35,14 @@ class ExcelImportPreviewService:
         *,
         workbook_reader: Optional[XlsxReader] = None,
         exchange_rate_tool: Optional[ExchangeRateTool] = None,
+        fill_missing_cny: bool = False,
+        enrich_asset_rates: bool = False,
     ) -> None:
         self.workbook_reader = workbook_reader or XlsxReader()
         self.exchange_rate_tool = exchange_rate_tool or ExchangeRateTool()
+        self.fill_missing_cny = fill_missing_cny
+        self.enrich_asset_rates = enrich_asset_rates
+        self._rate_cache: Dict[Tuple[str, str], Optional[float]] = {}
 
     def preview_forex_transactions(self, workbook_bytes: bytes, *, source_name: str = "uploaded.xlsx") -> Dict[str, Any]:
         sheets = self.workbook_reader.read(workbook_bytes)
@@ -336,13 +341,13 @@ class ExcelImportPreviewService:
         if category == "外汇" or (not category and ("卖出货币" in row or "买入货币" in row)):
             return self._build_forex_transaction_preview(row_number=row_number, row=row)
         if category == "基金":
-            return self._build_asset_event_preview(row=row, asset_type=AssetType.FUND)
+            return self._build_asset_event_preview(row=row, asset_type=self._asset_type_for_category(row=row, default=AssetType.FUND))
         if category == "理财":
-            return self._build_asset_event_preview(row=row, asset_type=AssetType.WEALTH_PRODUCT)
+            return self._build_asset_event_preview(row=row, asset_type=self._asset_type_for_category(row=row, default=AssetType.WEALTH_PRODUCT))
         if category == "结息":
             return self._build_cash_income_event_preview(row=row, event_type=EventType.INTEREST_INCOME)
         if category == "定期":
-            return self._build_cash_income_event_preview(row=row, event_type=EventType.WEALTH_INCOME)
+            return self._build_asset_event_preview(row=row, asset_type=AssetType.WEALTH_PRODUCT)
         return RowComputation(transaction=None, portfolio_event=None, warnings=[], errors=[f"不支持的交易类别: {category or '空'}"])
 
     def _build_forex_transaction_preview(self, *, row_number: int, row: Dict[str, Any]) -> RowComputation:
@@ -392,13 +397,15 @@ class ExcelImportPreviewService:
 
             if sell_currency == "CNY":
                 if sell_amount is None:
-                    warnings.append("源表缺少 CNY 卖出金额，已用历史汇率估算")
-                    cny_rate = self._lookup_rate(base_currency=buy_currency, timestamp=trade_time, warnings=warnings, errors=errors)
-                    if cny_rate is not None:
-                        transaction["unit_price"] = cny_rate
-                        transaction["trade_currency"] = "CNY"
-                        transaction["exchange_rate_to_cny"] = 1.0
-                        transaction["total_cost_cny"] = round(buy_amount * cny_rate, 2)
+                    warnings.append("源表缺少 CNY 卖出金额")
+                    if self.fill_missing_cny:
+                        cny_rate = self._lookup_rate(base_currency=buy_currency, timestamp=trade_time, warnings=warnings, errors=errors)
+                        if cny_rate is not None:
+                            warnings.append("已按交易日历史汇率补全")
+                            transaction["unit_price"] = cny_rate
+                            transaction["trade_currency"] = "CNY"
+                            transaction["exchange_rate_to_cny"] = 1.0
+                            transaction["total_cost_cny"] = round(buy_amount * cny_rate, 2)
                 else:
                     transaction["unit_price"] = round(sell_amount / buy_amount, 6)
                     transaction["trade_currency"] = "CNY"
@@ -434,13 +441,15 @@ class ExcelImportPreviewService:
                     transaction["exchange_rate_to_cny"] = 1.0
                     transaction["total_cost_cny"] = round(buy_amount, 2)
                 else:
-                    cny_rate = self._lookup_rate(base_currency=sell_currency, timestamp=trade_time, warnings=warnings, errors=errors)
-                    if cny_rate is not None:
-                        transaction["unit_price"] = cny_rate
-                        transaction["trade_currency"] = "CNY"
-                        transaction["exchange_rate_to_cny"] = 1.0
-                        transaction["total_cost_cny"] = round(sell_amount * cny_rate, 2)
-                        warnings.append("源表缺少 CNY 买入金额，已用历史汇率估算")
+                    warnings.append("源表缺少 CNY 买入金额")
+                    if self.fill_missing_cny:
+                        cny_rate = self._lookup_rate(base_currency=sell_currency, timestamp=trade_time, warnings=warnings, errors=errors)
+                        if cny_rate is not None:
+                            transaction["unit_price"] = cny_rate
+                            transaction["trade_currency"] = "CNY"
+                            transaction["exchange_rate_to_cny"] = 1.0
+                            transaction["total_cost_cny"] = round(sell_amount * cny_rate, 2)
+                            warnings.append("已按交易日历史汇率补全")
             else:
                 if buy_currency is None or buy_amount is None:
                     errors.append("跨币种卖出缺少买入货币或买入金额")
@@ -477,6 +486,8 @@ class ExcelImportPreviewService:
         note = str(row.get("备注") or "")
         buy_per_sell = round(buy_amount / sell_amount, 8) if sell_amount else None
         sell_per_buy = round(sell_amount / buy_amount, 8) if buy_amount else None
+        sell_rate = self._rate_for_currency(currency=sell_currency, timestamp=trade_time)
+        buy_rate = self._rate_for_currency(currency=buy_currency, timestamp=trade_time)
         return self._event_payload(
             event_type=EventType.FX_SWAP,
             trade_time=trade_time,
@@ -486,7 +497,7 @@ class ExcelImportPreviewService:
                     "currency": sell_currency,
                     "amount_delta": -sell_amount,
                     "rmb_amount": None,
-                    "fx_rate_to_cny": None,
+                    "fx_rate_to_cny": sell_rate,
                     "is_external_flow": False,
                     "description": f"FX swap out; {buy_currency}/{sell_currency}={buy_per_sell}",
                 },
@@ -494,7 +505,7 @@ class ExcelImportPreviewService:
                     "currency": buy_currency,
                     "amount_delta": buy_amount,
                     "rmb_amount": None,
-                    "fx_rate_to_cny": None,
+                    "fx_rate_to_cny": buy_rate,
                     "is_external_flow": False,
                     "description": f"FX swap in; {sell_currency}/{buy_currency}={sell_per_buy}",
                 },
@@ -518,6 +529,7 @@ class ExcelImportPreviewService:
         asset = self._asset_payload(asset_type=asset_type, name=name, currency=sell_currency or buy_currency)
 
         if sell_currency and sell_amount not in (None, 0):
+            fx_rate = self._rate_for_currency(currency=sell_currency, timestamp=trade_time)
             event_type = EventType.FUND_BUY if asset_type == AssetType.FUND else EventType.WEALTH_BUY
             event = self._event_payload(
                 event_type=event_type,
@@ -528,7 +540,7 @@ class ExcelImportPreviewService:
                         "currency": sell_currency,
                         "amount_delta": -sell_amount,
                         "rmb_amount": None,
-                        "fx_rate_to_cny": None,
+                        "fx_rate_to_cny": fx_rate,
                         "is_external_flow": False,
                         "description": f"{asset_type.value} purchase cash outflow",
                     }
@@ -540,7 +552,7 @@ class ExcelImportPreviewService:
                         "cash_currency": sell_currency,
                         "cash_amount": sell_amount,
                         "unit_price": 1,
-                        "fx_rate_to_cny": None,
+                        "fx_rate_to_cny": fx_rate,
                         "description": note or f"{asset_type.value} purchase",
                     }
                 ],
@@ -548,6 +560,7 @@ class ExcelImportPreviewService:
             return RowComputation(transaction=None, portfolio_event=event, warnings=warnings, errors=errors)
 
         if buy_currency and buy_amount not in (None, 0):
+            fx_rate = self._rate_for_currency(currency=buy_currency, timestamp=trade_time)
             if asset_type == AssetType.FUND and "分红" in note:
                 event_type = EventType.FUND_DIVIDEND
                 asset_entries: List[Dict[str, Any]] = []
@@ -560,7 +573,7 @@ class ExcelImportPreviewService:
                         "cash_currency": buy_currency,
                         "cash_amount": buy_amount,
                         "unit_price": 1,
-                        "fx_rate_to_cny": None,
+                        "fx_rate_to_cny": fx_rate,
                         "description": note or f"{asset_type.value} redemption",
                     }
                 ]
@@ -573,7 +586,7 @@ class ExcelImportPreviewService:
                         "currency": buy_currency,
                         "amount_delta": buy_amount,
                         "rmb_amount": None,
-                        "fx_rate_to_cny": None,
+                        "fx_rate_to_cny": fx_rate,
                         "is_external_flow": False,
                         "description": note or f"{asset_type.value} cash inflow",
                     }
@@ -584,6 +597,49 @@ class ExcelImportPreviewService:
 
         errors.append(f"{asset_type.value} 记录缺少可用的现金流金额")
         return RowComputation(transaction=None, portfolio_event=None, warnings=warnings, errors=errors)
+
+    def _asset_type_for_category(self, *, row: Dict[str, Any], default: AssetType) -> AssetType:
+        name = str(row.get("名称") or "")
+        note = str(row.get("备注") or "")
+        text = f"{name} {note}"
+        if "理财" in text:
+            return AssetType.WEALTH_PRODUCT
+        return default
+
+    def _rate_for_currency(
+        self,
+        *,
+        currency: Optional[str],
+        timestamp: Optional[datetime],
+    ) -> Optional[float]:
+        if not currency:
+            return None
+        if currency.upper() == "CNY":
+            return 1.0
+        if not self.enrich_asset_rates:
+            return None
+        if timestamp is None:
+            return None
+        cache_key = (currency.upper(), timestamp.date().isoformat())
+        if cache_key in self._rate_cache:
+            return self._rate_cache[cache_key]
+        response = self.exchange_rate_tool.execute(
+            {
+                "base_currency": currency,
+                "quote_currency": "CNY",
+                "timestamp": timestamp.isoformat(),
+            }
+        )
+        if not response["ok"]:
+            self._rate_cache[cache_key] = None
+            return None
+        result = response["result"]
+        if result["is_estimated"] or result.get("source") != "PRIMARY":
+            self._rate_cache[cache_key] = None
+            return None
+        rate = float(result["rate"])
+        self._rate_cache[cache_key] = rate
+        return rate
 
     def _build_cash_income_event_preview(self, *, row: Dict[str, Any], event_type: EventType) -> RowComputation:
         warnings: List[str] = []
@@ -596,6 +652,7 @@ class ExcelImportPreviewService:
         if not buy_currency or buy_amount in (None, 0):
             errors.append("现金收入记录缺少买入货币或买入金额")
             return RowComputation(transaction=None, portfolio_event=None, warnings=warnings, errors=errors)
+        fx_rate = self._rate_for_currency(currency=buy_currency, timestamp=trade_time)
         event = self._event_payload(
             event_type=event_type,
             trade_time=trade_time,
@@ -605,7 +662,7 @@ class ExcelImportPreviewService:
                     "currency": buy_currency,
                     "amount_delta": buy_amount,
                     "rmb_amount": None,
-                    "fx_rate_to_cny": None,
+                    "fx_rate_to_cny": fx_rate,
                     "is_external_flow": False,
                     "description": str(row.get("备注") or row.get("名称") or "cash income"),
                 }
@@ -636,7 +693,7 @@ class ExcelImportPreviewService:
 
     def _asset_payload(self, *, asset_type: AssetType, name: str, currency: Optional[str]) -> Dict[str, Any]:
         normalized_currency = currency or "UNKNOWN"
-        digest = hashlib.sha1(f"{asset_type.value}|{normalized_currency}|{name}".encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.sha1(f"{asset_type.value}|{normalized_currency}|{name}".encode("utf-8")).hexdigest()[:12].upper()
         return {
             "asset_type": asset_type.value,
             "asset_code": f"{asset_type.value[:4]}-{digest}",
@@ -676,8 +733,9 @@ class ExcelImportPreviewService:
             return None
 
         result = response["result"]
-        if result["is_estimated"]:
-            warnings.append(f"{base_currency}/CNY 历史汇率使用估算值")
+        if result["is_estimated"] or result.get("source") != "PRIMARY":
+            errors.append(f"{base_currency}/CNY 缺少可用的交易日实时历史汇率")
+            return None
         return float(result["rate"])
 
     def _normalize_currency(self, value: Any) -> Optional[str]:

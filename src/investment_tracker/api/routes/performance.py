@@ -11,8 +11,8 @@ from fastapi import APIRouter, HTTPException
 from investment_tracker.api.schemas import PortfolioEventCreateRequest, ScreenshotUploadRequest, ValuationCreateRequest, WealthPositionSnapshotRequest
 from investment_tracker.data.db import get_db_session
 from investment_tracker.data.enums import AssetType
-from investment_tracker.data.models import Asset, CashLedgerEntry
-from investment_tracker.data.services import ExchangeRateService, PerformanceService, PortfolioEventService
+from investment_tracker.data.models import Asset, AuditLog, CashLedgerEntry
+from investment_tracker.data.services import AuditService, PerformanceService, PortfolioEventService
 from investment_tracker.mcp_tools.ocr_tool import OCRTool
 
 
@@ -72,16 +72,84 @@ def _parse_wealth_position_text(text: str) -> list[dict]:
 async def get_performance(user_id: int = 1, valuation_time: Optional[str] = None) -> dict:
     cutoff = datetime.fromisoformat(valuation_time.replace("Z", "+00:00")) if valuation_time else None
     with get_db_session() as session:
-        ExchangeRateService(session).refresh_rates(currencies=_currencies_for_user(session, user_id=user_id), create_backup=False)
         service = PerformanceService(session)
         return service.performance(user_id=user_id, valuation_time=cutoff)
+
+
+@router.get("/api/performance/audit")
+async def get_performance_audit(
+    user_id: int = 1,
+    currency: Optional[str] = None,
+    valuation_time: Optional[str] = None,
+    expected_cash: Optional[float] = None,
+    expected_assets: Optional[float] = None,
+    expected_value_cny: Optional[float] = None,
+) -> dict:
+    try:
+        cutoff = datetime.fromisoformat(valuation_time.replace("Z", "+00:00")) if valuation_time else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid valuation_time: {valuation_time}") from exc
+
+    expected_values = {
+        key: value
+        for key, value in {
+            "expected_cash": expected_cash,
+            "expected_assets": expected_assets,
+            "expected_value_cny": expected_value_cny,
+        }.items()
+        if value is not None
+    }
+
+    try:
+        with get_db_session() as session:
+            service = AuditService(session)
+            audit = service.generate_audit(
+                user_id=user_id,
+                currency=currency,
+                valuation_time=cutoff,
+                expected_values=expected_values,
+            )
+            log = service.create_audit_log(
+                user_id=user_id,
+                currencies_audited=audit["currencies_audited"],
+                discrepancies_found=audit["summary"]["total_discrepancies"],
+                audit_details=audit,
+            )
+            audit["audit_log_id"] = log.id
+            return audit
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/performance/audit-history")
+async def get_performance_audit_history(user_id: int = 1, limit: int = 50) -> dict:
+    with get_db_session() as session:
+        service = AuditService(session)
+        return {"audit_logs": service.get_audit_history(user_id=user_id, limit=limit)}
+
+
+@router.get("/api/performance/audit/{audit_id}")
+async def get_performance_audit_detail(audit_id: int, user_id: int = 1) -> dict:
+    with get_db_session() as session:
+        log = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.id == audit_id,
+                AuditLog.user_id == user_id,
+                AuditLog.entity_type == "performance_audit",
+            )
+            .one_or_none()
+        )
+        if log is None:
+            raise HTTPException(status_code=404, detail="audit not found")
+        details = log.details_json or {}
+        return details.get("audit_report", details)
 
 
 @router.get("/api/cash-balances")
 async def get_cash_balances(user_id: int = 1, valuation_time: Optional[str] = None) -> dict:
     cutoff = datetime.fromisoformat(valuation_time.replace("Z", "+00:00")) if valuation_time else None
     with get_db_session() as session:
-        ExchangeRateService(session).refresh_rates(currencies=_currencies_for_user(session, user_id=user_id), create_backup=False)
         service = PerformanceService(session)
         return service.cash_balances(user_id=user_id, valuation_time=cutoff)
 

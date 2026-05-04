@@ -32,6 +32,7 @@ import {
   createTransaction,
   deleteTransactionRecord,
   listTransactions,
+  updateHistoricalRate,
   updateTransactionRecord,
 } from '../../services/transactions';
 import type {
@@ -475,6 +476,16 @@ export default function TransactionsPage() {
     onError: (error: { message: string }) => notifications.error(error.message),
   });
 
+  const rateMutation = useMutation({
+    mutationFn: (row: Transaction) => updateHistoricalRate(row.record_type ?? 'TRANSACTION', row.id),
+    onSuccess: (row) => {
+      notifications.success('历史汇率已更新');
+      setSelectedTransaction(row);
+      invalidateTransactionViews();
+    },
+    onError: (error: { message: string }) => notifications.error(error.message),
+  });
+
   const sortedRows = useMemo(() => {
     const rows = [...(query.data ?? [])];
     rows.sort((left, right) => {
@@ -679,6 +690,12 @@ export default function TransactionsPage() {
                 }}
               >
                 Delete
+              </Button>
+              <Button
+                disabled={rateMutation.isPending}
+                onClick={() => rateMutation.mutate(selectedTransaction)}
+              >
+                Update Rate
               </Button>
               <Button
                 variant="contained"

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import date
 import time
 
 from investment_tracker.mcp_tools import ExchangeRateTool, OCRTool, TransactionParserTool
+from investment_tracker.mcp_tools.exchange_rate_tool import StaticExchangeRateProvider
 
 
 def test_ocr_smoke_performance() -> None:
@@ -20,7 +22,12 @@ def test_ocr_smoke_performance() -> None:
 
 
 def test_exchange_rate_smoke_performance() -> None:
-    tool = ExchangeRateTool()
+    tool = ExchangeRateTool(
+        primary_provider=StaticExchangeRateProvider(
+            {("USD", "CNY"): {date(2026, 4, 26): 7.23}},
+            "PRIMARY",
+        )
+    )
 
     start = time.perf_counter()
     result = tool.execute({"base_currency": "USD", "quote_currency": "CNY"})

@@ -1,5 +1,5 @@
 import { apiClient } from './api';
-import type { PositionResponse } from '../types/positions';
+import type { PositionResponse, ValuationCreatePayload } from '../types/positions';
 
 export async function listPositions(params: {
   user_id: number;
@@ -8,4 +8,8 @@ export async function listPositions(params: {
 }): Promise<PositionResponse> {
   const response = await apiClient.get<PositionResponse>('/api/positions', { params });
   return response.data;
+}
+
+export async function createValuation(payload: ValuationCreatePayload): Promise<void> {
+  await apiClient.post('/api/valuations', payload);
 }

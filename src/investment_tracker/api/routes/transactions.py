@@ -7,12 +7,14 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from sqlalchemy.orm import selectinload
 
 from investment_tracker.api.schemas import ScreenshotUploadRequest, TransactionCreateRequest, TransactionHistoryUpdateRequest
 from investment_tracker.data.db import get_db_session
 from investment_tracker.data.enums import AssetType, EventType, TransactionDirection
 from investment_tracker.data.models import AssetLedgerEntry, CashLedgerEntry, PortfolioEvent, Transaction
 from investment_tracker.data.repositories import TransactionRepository
+from investment_tracker.mcp_tools.exchange_rate_tool import ExchangeRateTool
 from investment_tracker.orchestration.excel_import_service import ExcelImportPreviewService
 from investment_tracker.orchestration.screenshot_import_service import ScreenshotImportService
 
@@ -232,7 +234,7 @@ def _event_history_row(event: PortfolioEvent) -> Dict[str, Any]:
         "unit_price": _event_unit_price(event),
         "trade_currency": _event_trade_currency(event),
         "trade_time": event.event_time.isoformat(),
-        "exchange_rate_to_cny": None,
+        "exchange_rate_to_cny": _event_rate_to_cny(event),
         "total_cost_cny": abs(signed_cost) if signed_cost is not None else None,
         "signed_total_cost_cny": signed_cost,
         "trade_amount": native_amount,
@@ -243,6 +245,20 @@ def _event_history_row(event: PortfolioEvent) -> Dict[str, Any]:
         "notes": event.notes,
         "search_text": " ".join(item for item in search_parts if item),
     }
+
+
+def _event_rate_to_cny(event: PortfolioEvent) -> Optional[float]:
+    asset_entry = next(iter(event.asset_ledger_entries), None)
+    if asset_entry is not None and asset_entry.fx_rate_to_cny is not None:
+        return float(asset_entry.fx_rate_to_cny)
+    values = [
+        Decimal(str(item.fx_rate_to_cny))
+        for item in event.cash_ledger_entries
+        if item.fx_rate_to_cny is not None and item.currency != "CNY"
+    ]
+    if not values:
+        return None
+    return float(values[0])
 
 
 def _matches_history_filters(row: Dict[str, Any], *, asset_code: Optional[str], direction: Optional[str]) -> bool:
@@ -312,6 +328,9 @@ async def list_transactions(
         event_query = session.query(PortfolioEvent).filter(
             PortfolioEvent.user_id == user_id,
             PortfolioEvent.event_type.notin_(LEGACY_EVENT_TYPES),
+        ).options(
+            selectinload(PortfolioEvent.cash_ledger_entries),
+            selectinload(PortfolioEvent.asset_ledger_entries).selectinload(AssetLedgerEntry.asset),
         )
         if start_dt is not None:
             event_query = event_query.filter(PortfolioEvent.event_time >= start_dt)
@@ -390,6 +409,96 @@ async def delete_transaction_history_record(record_type: str, record_id: int) ->
             return {"deleted": True, "record_type": "TRANSACTION", "id": record_id}
 
     raise HTTPException(status_code=400, detail="record_type must be EVENT or TRANSACTION")
+
+
+@router.post("/{record_type}/{record_id}/historical-rate")
+async def update_historical_rate(record_type: str, record_id: int) -> dict:
+    normalized_type = record_type.upper()
+    tool = ExchangeRateTool()
+    with get_db_session() as session:
+        if normalized_type == "TRANSACTION":
+            row = session.get(Transaction, record_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="transaction not found")
+            if row.trade_currency.upper() != "CNY":
+                raise HTTPException(status_code=400, detail="only CNY-denominated FX transactions are supported")
+            response = tool.execute(
+                {
+                    "base_currency": row.asset_code,
+                    "quote_currency": "CNY",
+                    "timestamp": row.trade_time.isoformat(),
+                }
+            )
+            if not response["ok"]:
+                raise HTTPException(status_code=502, detail=response.get("error", {}).get("message", "historical rate query failed"))
+            result = response["result"]
+            if result["is_estimated"] or result.get("source") != "PRIMARY":
+                raise HTTPException(status_code=409, detail="只查到估算或兜底汇率，未写入。请手动填写真实成交金额。")
+
+            rate = Decimal(str(result["rate"]))
+            quantity = Decimal(str(row.quantity))
+            row.unit_price = rate
+            row.exchange_rate_to_cny = Decimal("1")
+            row.total_cost_cny = quantity * rate
+            session.commit()
+            session.refresh(row)
+            return {"record": _transaction_history_row(row), "rate": result}
+
+        if normalized_type == "EVENT":
+            event = session.get(PortfolioEvent, record_id)
+            if event is None:
+                raise HTTPException(status_code=404, detail="event not found")
+            changed = _apply_event_historical_rate(event, tool)
+            if not changed:
+                raise HTTPException(status_code=400, detail="这条记录没有可更新的非人民币现金流或资产流水。")
+            session.commit()
+            session.refresh(event)
+            return {"record": _event_history_row(event), "updated_count": changed}
+
+    raise HTTPException(status_code=400, detail="record_type must be EVENT or TRANSACTION")
+
+
+def _apply_event_historical_rate(event: PortfolioEvent, tool: ExchangeRateTool) -> int:
+    updated = 0
+    currencies = {
+        item.currency.upper()
+        for item in event.cash_ledger_entries
+        if item.currency and item.currency.upper() != "CNY"
+    }
+    currencies.update(
+        item.cash_currency.upper()
+        for item in event.asset_ledger_entries
+        if item.cash_currency and item.cash_currency.upper() != "CNY"
+    )
+    rates: Dict[str, Decimal] = {}
+    for currency in currencies:
+        response = tool.execute(
+            {
+                "base_currency": currency,
+                "quote_currency": "CNY",
+                "timestamp": event.event_time.isoformat(),
+            }
+        )
+        if not response["ok"]:
+            continue
+        result = response["result"]
+        if result["is_estimated"] or result.get("source") != "PRIMARY":
+            continue
+        rates[currency] = Decimal(str(result["rate"]))
+
+    for item in event.cash_ledger_entries:
+        rate = rates.get(item.currency.upper())
+        if rate is None:
+            continue
+        item.fx_rate_to_cny = rate
+        updated += 1
+    for item in event.asset_ledger_entries:
+        rate = rates.get(item.cash_currency.upper())
+        if rate is None:
+            continue
+        item.fx_rate_to_cny = rate
+        updated += 1
+    return updated
 
 
 @router.post("/import-excel-preview")

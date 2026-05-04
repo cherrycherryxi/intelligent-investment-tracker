@@ -3,11 +3,16 @@ import {
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   Grid,
   InputLabel,
   MenuItem,
   Stack,
+  TextField,
   Typography,
 } from '@mui/material';
 import Select from '@mui/material/Select';
@@ -17,10 +22,11 @@ import { useState } from 'react';
 import { DataTable } from '../../components/common/DataTable';
 import { LoadingSpinner } from '../../components/common/LoadingSpinner';
 import { SectionCard } from '../../components/common/SectionCard';
-import { listPositions } from '../../services/positions';
+import { useNotification } from '../../hooks/useNotification';
+import { createValuation, listPositions } from '../../services/positions';
 import type { Position } from '../../types/positions';
 import { DEFAULT_USER_ID } from '../../utils/constants';
-import { formatCurrency, formatNumber, formatPercentage } from '../../utils/formatting';
+import { formatCurrency, formatNumber, formatPercentage, toDatetimeLocalValue } from '../../utils/formatting';
 
 function valueColor(value?: number | null) {
   if (value === null || value === undefined) return 'text.secondary';
@@ -33,10 +39,32 @@ function statusColor(status?: Position['valuation_status']) {
   return 'warning';
 }
 
+function formatPositionCost(row: Position): string {
+  if (row.currency && row.currency !== 'CNY' && row.native_cost !== null && row.native_cost !== undefined) {
+    return `${formatNumber(row.native_cost, 6)} ${row.currency}`;
+  }
+  if (row.cost_basis_cny !== null && row.cost_basis_cny !== undefined) {
+    return formatCurrency(row.cost_basis_cny);
+  }
+  if (row.native_cost !== null && row.native_cost !== undefined && row.currency) {
+    return `${formatNumber(row.native_cost, 6)} ${row.currency}`;
+  }
+  return '-';
+}
+
+function isAmountValuedPosition(row: Position): boolean {
+  return row.asset_type === 'BOND' || row.asset_type === 'FUND' || row.asset_type === 'WEALTH_PRODUCT';
+}
+
 export default function PositionsPage() {
   const [assetType, setAssetType] = useState('');
   const [sortBy, setSortBy] = useState('asset_code');
+  const [snapshotTarget, setSnapshotTarget] = useState<Position | null>(null);
+  const [snapshotValue, setSnapshotValue] = useState('');
+  const [snapshotTime, setSnapshotTime] = useState(toDatetimeLocalValue(new Date().toISOString()));
+  const [savingSnapshot, setSavingSnapshot] = useState(false);
   const queryClient = useQueryClient();
+  const notification = useNotification();
 
   const query = useQuery({
     queryKey: ['positions', assetType, sortBy],
@@ -48,14 +76,84 @@ export default function PositionsPage() {
       }),
   });
 
+  const openSnapshotDialog = (row: Position) => {
+    setSnapshotTarget(row);
+    setSnapshotValue(row.current_value_native?.toString() ?? row.quantity.toString());
+    setSnapshotTime(toDatetimeLocalValue(new Date().toISOString()));
+  };
+
+  const submitSnapshot = async () => {
+    if (!snapshotTarget?.asset_id) return;
+    const marketValue = Number(snapshotValue);
+    if (!Number.isFinite(marketValue) || marketValue < 0) {
+      notification.error('Current holding must be a valid non-negative number.');
+      return;
+    }
+    setSavingSnapshot(true);
+    try {
+      await createValuation({
+        user_id: DEFAULT_USER_ID,
+        asset_id: snapshotTarget.asset_id,
+        valuation_time: new Date(snapshotTime).toISOString(),
+        quantity: marketValue,
+        price: 1,
+        market_value: marketValue,
+        currency: snapshotTarget.currency,
+        source: 'manual',
+        is_estimated: false,
+      });
+      notification.success('Position snapshot saved.');
+      setSnapshotTarget(null);
+      await queryClient.invalidateQueries({ queryKey: ['positions'] });
+      await queryClient.invalidateQueries({ queryKey: ['performance'] });
+      await queryClient.invalidateQueries({ queryKey: ['performance-audit'] });
+    } catch (error) {
+      notification.error(error instanceof Error ? error.message : 'Failed to save snapshot.');
+    } finally {
+      setSavingSnapshot(false);
+    }
+  };
+
   const columns = [
-    { key: 'asset_code', header: 'Code', sortable: true, render: (row: Position) => row.asset_code },
+    {
+      key: 'asset_name',
+      header: 'Product',
+      sortable: true,
+      render: (row: Position) => (
+        <Stack spacing={0.25}>
+          <Typography>{row.asset_name || row.asset_code}</Typography>
+          <Typography variant="caption" color="text.secondary">
+            {row.asset_code}
+          </Typography>
+        </Stack>
+      ),
+    },
     { key: 'asset_type', header: 'Type', render: (row: Position) => row.asset_type },
     { key: 'currency', header: 'Currency', render: (row: Position) => row.currency ?? '-' },
     { key: 'quantity', header: 'Quantity', align: 'right' as const, render: (row: Position) => formatNumber(row.quantity, 6) },
-    { key: 'cost_basis_cny', header: 'Cost', align: 'right' as const, render: (row: Position) => formatCurrency(row.cost_basis_cny) },
+    { key: 'cost_basis_cny', header: 'Cost', align: 'right' as const, render: (row: Position) => formatPositionCost(row) },
     { key: 'current_price', header: 'Price/Rate', align: 'right' as const, render: (row: Position) => formatNumber(row.current_price, 6) },
     { key: 'current_value_cny', header: 'Value', align: 'right' as const, render: (row: Position) => formatCurrency(row.current_value_cny) },
+    {
+      key: 'investment_pnl_cny',
+      header: 'Investment PnL',
+      align: 'right' as const,
+      render: (row: Position) => (
+        <Typography color={valueColor(row.investment_pnl_cny)}>
+          {formatCurrency(row.investment_pnl_cny)}
+        </Typography>
+      ),
+    },
+    {
+      key: 'fx_pnl_cny',
+      header: 'FX PnL',
+      align: 'right' as const,
+      render: (row: Position) => (
+        <Typography color={valueColor(row.fx_pnl_cny)}>
+          {formatCurrency(row.fx_pnl_cny)}
+        </Typography>
+      ),
+    },
     {
       key: 'unrealized_pnl_cny',
       header: 'PnL',
@@ -82,6 +180,16 @@ export default function PositionsPage() {
       key: 'valuation_status',
       header: 'Status',
       render: (row: Position) => <Chip size="small" color={statusColor(row.valuation_status)} label={row.valuation_status ?? 'OK'} />,
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      render: (row: Position) =>
+        isAmountValuedPosition(row) && row.asset_id ? (
+          <Button size="small" onClick={() => openSnapshotDialog(row)}>
+            Snapshot
+          </Button>
+        ) : null,
     },
   ];
 
@@ -111,6 +219,8 @@ export default function PositionsPage() {
               {[
                 { label: 'Total Cost', value: formatCurrency(query.data?.totals.total_cost_cny) },
                 { label: 'Total Value', value: formatCurrency(query.data?.totals.total_value_cny) },
+                { label: 'Investment PnL', value: formatCurrency(query.data?.totals.total_investment_pnl_cny), tone: (query.data?.totals.total_investment_pnl_cny ?? 0) >= 0 ? 'success' : 'error' },
+                { label: 'FX PnL', value: formatCurrency(query.data?.totals.total_fx_pnl_cny), tone: (query.data?.totals.total_fx_pnl_cny ?? 0) >= 0 ? 'success' : 'error' },
                 { label: 'Total PnL', value: formatCurrency(query.data?.totals.total_pnl_cny), tone: (query.data?.totals.total_pnl_cny ?? 0) >= 0 ? 'success' : 'error' },
                 { label: 'Total Return', value: formatPercentage(query.data?.totals.total_return_pct), tone: (query.data?.totals.total_return_pct ?? 0) >= 0 ? 'success' : 'error' },
               ].map((item) => (
@@ -143,7 +253,7 @@ export default function PositionsPage() {
                 <FormControl fullWidth>
                   <InputLabel>Sort By</InputLabel>
                   <Select value={sortBy} label="Sort By" onChange={(event) => setSortBy(event.target.value)}>
-                    <MenuItem value="asset_code">Asset Code</MenuItem>
+                    <MenuItem value="asset_code">Product</MenuItem>
                     <MenuItem value="pnl">PnL</MenuItem>
                     <MenuItem value="return_pct">Return %</MenuItem>
                   </Select>
@@ -164,6 +274,42 @@ export default function PositionsPage() {
           </Stack>
         )}
       </SectionCard>
+
+      <Dialog open={Boolean(snapshotTarget)} onClose={() => setSnapshotTarget(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Current Holding Snapshot</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <Box>
+              <Typography fontWeight={700}>{snapshotTarget?.asset_name || snapshotTarget?.asset_code}</Typography>
+              <Typography variant="body2" color="text.secondary">
+                {snapshotTarget?.asset_code} · {snapshotTarget?.currency}
+              </Typography>
+            </Box>
+            <TextField
+              label="Current Holding Amount"
+              type="number"
+              value={snapshotValue}
+              onChange={(event) => setSnapshotValue(event.target.value)}
+              helperText="For amount-valued products, this is the bank/broker displayed current holding amount."
+              fullWidth
+            />
+            <TextField
+              label="Snapshot Time"
+              type="datetime-local"
+              value={snapshotTime}
+              onChange={(event) => setSnapshotTime(event.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSnapshotTarget(null)}>Cancel</Button>
+          <Button variant="contained" disabled={savingSnapshot} onClick={() => void submitSnapshot()}>
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 }

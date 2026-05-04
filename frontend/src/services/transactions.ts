@@ -40,6 +40,14 @@ export async function deleteTransactionRecord(recordType: 'TRANSACTION' | 'EVENT
   await apiClient.delete(`/api/transactions/${recordType}/${id}`);
 }
 
+export async function updateHistoricalRate(
+  recordType: 'TRANSACTION' | 'EVENT',
+  id: number,
+): Promise<Transaction> {
+  const response = await apiClient.post<{ record: Transaction }>(`/api/transactions/${recordType}/${id}/historical-rate`);
+  return response.data.record;
+}
+
 export async function uploadScreenshots(files: ScreenshotUploadItem[]): Promise<ScreenshotPreviewResponse> {
   const response = await apiClient.post<ScreenshotPreviewResponse>('/api/transactions/upload', {
     files,

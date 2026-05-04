@@ -19,6 +19,7 @@ import { NavLink } from 'react-router-dom';
 const navItems = [
   { to: '/transactions', label: 'Transactions' },
   { to: '/performance', label: 'Performance' },
+  { to: '/performance/audit', label: 'Audit' },
   { to: '/positions', label: 'Positions' },
   { to: '/imports', label: 'Import' },
   { to: '/advice', label: 'Advice' },

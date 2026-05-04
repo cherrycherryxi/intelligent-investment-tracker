@@ -1,7 +1,9 @@
 import RefreshIcon from '@mui/icons-material/Refresh';
+import RuleIcon from '@mui/icons-material/Rule';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import { Box, Button, Chip, Grid, Stack, Typography } from '@mui/material';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link as RouterLink } from 'react-router-dom';
 
 import { DataTable } from '../../components/common/DataTable';
 import { LoadingSpinner } from '../../components/common/LoadingSpinner';
@@ -52,9 +54,14 @@ export default function PerformancePage() {
       <SectionCard
         title="Portfolio Performance"
         action={
-          <Button startIcon={<RefreshIcon />} onClick={() => void queryClient.invalidateQueries({ queryKey: ['performance'] })}>
-            Refresh
-          </Button>
+          <Stack direction="row" spacing={1}>
+            <Button component={RouterLink} to="/performance/audit" startIcon={<RuleIcon />}>
+              Audit Data
+            </Button>
+            <Button startIcon={<RefreshIcon />} onClick={() => void queryClient.invalidateQueries({ queryKey: ['performance'] })}>
+              Refresh
+            </Button>
+          </Stack>
         }
       >
         {query.isLoading ? (

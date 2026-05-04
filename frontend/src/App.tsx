@@ -6,6 +6,7 @@ import { AppLayout } from './components/layout/AppLayout';
 
 const TransactionsPage = lazy(() => import('./features/transactions/TransactionsPage'));
 const PerformancePage = lazy(() => import('./features/performance/PerformancePage'));
+const AuditPage = lazy(() => import('./features/performance/AuditPage'));
 const PositionsPage = lazy(() => import('./features/positions/PositionsPage'));
 const ImportsPage = lazy(() => import('./features/imports/ImportsPage'));
 const AdvicePage = lazy(() => import('./features/advice/AdvicePage'));
@@ -20,6 +21,7 @@ export function App() {
             <Route path="/" element={<Navigate to="/transactions" replace />} />
             <Route path="/transactions" element={<TransactionsPage />} />
             <Route path="/performance" element={<PerformancePage />} />
+            <Route path="/performance/audit" element={<AuditPage />} />
             <Route path="/positions" element={<PositionsPage />} />
             <Route path="/imports" element={<ImportsPage />} />
             <Route path="/advice" element={<AdvicePage />} />
