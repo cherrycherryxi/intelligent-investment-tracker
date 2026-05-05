@@ -7,12 +7,12 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from investment_tracker.data.db import get_db_session
 from investment_tracker.data.enums import AssetType, EventType
-from investment_tracker.data.models import Asset, AssetLedgerEntry, CashLedgerEntry, ExchangeRate, PortfolioEvent, ValuationSnapshot
-from investment_tracker.data.services import PerformanceService
+from investment_tracker.data.models import Asset, AssetLedgerEntry, Attribution, AttributionGap, CashLedgerEntry, ExchangeRate, FundingLot, PortfolioEvent, ValuationSnapshot
+from investment_tracker.data.services import AttributionStatusTracker, AttributionStore, PerformanceService
 
 
 router = APIRouter(prefix="/api/positions", tags=["positions"])
@@ -56,6 +56,24 @@ def _latest_valuations(session, *, user_id: int, cutoff: datetime) -> dict[int, 
         if row.asset_id not in latest:
             latest[row.asset_id] = row
     return latest
+
+
+def _attribution_summary(session, *, asset_id: int) -> dict:
+    rows = (
+        session.query(Attribution, FundingLot)
+        .join(FundingLot, FundingLot.id == Attribution.source_lot_id)
+        .filter(Attribution.target_asset_id == asset_id)
+        .all()
+    )
+    lots = [lot for _, lot in rows]
+    gap_count = session.query(AttributionGap).filter(AttributionGap.asset_id == asset_id, AttributionGap.resolved_at.is_(None)).count()
+    dates = [lot.created_at for lot in lots if lot.created_at is not None]
+    return {
+        "total_lots_used": len({lot.id for lot in lots}),
+        "oldest_lot_date": min(dates).isoformat() if dates else None,
+        "newest_lot_date": max(dates).isoformat() if dates else None,
+        "gap_count": gap_count,
+    }
 
 
 def _build_cash_positions(session, *, user_id: int, cutoff: datetime) -> list[dict]:
@@ -124,6 +142,8 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
     native_cost_by_asset: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
     cny_cost_by_asset: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
     has_cny_cost: dict[int, bool] = defaultdict(bool)
+    attributed_cost_by_asset: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
+    has_attributed_cost: dict[int, bool] = defaultdict(bool)
 
     assets_by_id = {asset.id: asset for asset in session.query(Asset).all()}
     rows = (
@@ -148,6 +168,18 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
         if row.fx_rate_to_cny is not None:
             cny_cost_by_asset[asset_id] += signed_amount * Decimal(str(row.fx_rate_to_cny))
             has_cny_cost[asset_id] = True
+
+    attribution_rows = (
+        session.query(Attribution)
+        .join(PortfolioEvent, PortfolioEvent.id == Attribution.target_event_id)
+        .filter(PortfolioEvent.user_id == user_id)
+        .all()
+    )
+    for row in attribution_rows:
+        if row.target_asset_id is None:
+            continue
+        attributed_cost_by_asset[row.target_asset_id] += Decimal(str(row.rmb_basis))
+        has_attributed_cost[row.target_asset_id] = True
 
     if not quantity_by_asset:
         return []
@@ -192,8 +224,16 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
             else:
                 current_value_cny = market_value * rate
 
-        cost_basis_cny = cny_cost_by_asset[asset_id] if has_cny_cost[asset_id] else None
+        cost_basis_cny = (
+            attributed_cost_by_asset[asset_id]
+            if has_attributed_cost[asset_id]
+            else cny_cost_by_asset[asset_id]
+            if has_cny_cost[asset_id]
+            else None
+        )
         native_cost = native_cost_by_asset[asset_id]
+        attributed_cost_basis_cny = attributed_cost_by_asset[asset_id] if has_attributed_cost[asset_id] else None
+        attribution_status = AttributionStatusTracker(session).compute_status(asset_id=asset_id, user_id=user_id)
         investment_pnl_cny = None
         fx_pnl_cny = None
         if (
@@ -226,6 +266,10 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
                 "ledger_quantity": _to_float(quantity, "0.000001"),
                 "average_cost_cny": _to_float(cost_basis_cny / quantity, "0.000001") if cost_basis_cny is not None and quantity else None,
                 "cost_basis_cny": _to_float(cost_basis_cny, "0.01"),
+                "legacy_cost_basis_cny": _to_float(cny_cost_by_asset[asset_id], "0.01") if has_cny_cost[asset_id] else None,
+                "attributed_cost_basis_cny": _to_float(attributed_cost_basis_cny, "0.01"),
+                "attribution_status": attribution_status.value,
+                "attribution_summary": _attribution_summary(session, asset_id=asset_id),
                 "native_cost": _to_float(native_cost, "0.000001"),
                 "current_price": _to_float(current_price, "0.000001") if current_price is not None else None,
                 "current_value_native": _to_float(market_value, "0.01") if market_value is not None else None,
@@ -313,3 +357,81 @@ async def list_positions(
         totals["total_return_pct"] = round((total_pnl / total_cost * 100) if total_cost and total_pnl is not None else 0.0, 4)
 
     return {"positions": positions, "totals": totals}
+
+
+@router.get("/{asset_id}/attribution")
+async def get_position_attribution(asset_id: int, user_id: int = 1) -> dict:
+    with get_db_session() as session:
+        asset = session.get(Asset, asset_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+
+        tracker = AttributionStatusTracker(session)
+        store = AttributionStore(session)
+        attributions = store.get_attributions_for_asset(asset_id=asset_id)
+        grouped: dict[int, dict] = {}
+        for attribution in attributions:
+            event = attribution.target_event
+            if event is None or event.user_id != user_id:
+                continue
+            group = grouped.setdefault(
+                event.id,
+                {
+                    "purchase_event_id": event.id,
+                    "purchase_date": event.event_time.isoformat(),
+                    "purchase_amount": 0.0,
+                    "funding_sources": [],
+                },
+            )
+            group["purchase_amount"] += float(attribution.native_amount)
+            lot = attribution.source_lot
+            source_event = lot.source_event if lot is not None else None
+            effective_rate = (
+                Decimal(str(attribution.rmb_basis)) / Decimal(str(attribution.native_amount))
+                if Decimal(str(attribution.native_amount))
+                else None
+            )
+            try:
+                lineage_depth = max(node.depth for node in store.trace_to_origin(attribution_id=attribution.id))
+            except ValueError:
+                lineage_depth = 0
+            group["funding_sources"].append(
+                {
+                    "attribution_id": attribution.id,
+                    "lot_id": attribution.source_lot_id,
+                    "source_event_id": lot.source_event_id if lot is not None else None,
+                    "source_type": lot.source_type.value if lot is not None else None,
+                    "source_date": source_event.event_time.isoformat() if source_event is not None else None,
+                    "source_currency": lot.currency if lot is not None else None,
+                    "native_amount_allocated": float(attribution.native_amount),
+                    "rmb_basis_allocated": float(attribution.rmb_basis),
+                    "effective_rate": _to_float(effective_rate, "0.000001") if effective_rate is not None else None,
+                    "remaining_amount_on_source_lot": float(lot.remaining_amount) if lot is not None else None,
+                    "lineage_depth": lineage_depth,
+                }
+            )
+
+        gaps = [
+            {
+                "id": gap.id,
+                "event_id": gap.event_id,
+                "gap_type": gap.gap_type.value,
+                "currency": gap.currency,
+                "shortfall_amount": float(gap.shortfall_amount) if gap.shortfall_amount is not None else None,
+                "status": gap.status.value,
+                "detected_at": gap.detected_at.isoformat(),
+                "suggestions": tracker.suggest_corrections(gap=gap),
+            }
+            for gap in tracker.get_gaps(asset_id=asset_id)
+        ]
+        total_attributed_cost = sum((Decimal(str(item.rmb_basis)) for item in attributions), Decimal("0.00"))
+        return {
+            "asset_id": asset.id,
+            "asset_code": asset.asset_code,
+            "asset_name": asset.asset_name,
+            "currency": asset.currency,
+            "attribution_status": tracker.compute_status(asset_id=asset.id, user_id=user_id).value,
+            "total_attributed_cost_cny": _to_float(total_attributed_cost, "0.01") if attributions else None,
+            "attributions": list(grouped.values()),
+            "gaps": gaps,
+        }

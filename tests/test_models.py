@@ -7,8 +7,26 @@ from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from investment_tracker.data.base import Base
-from investment_tracker.data.enums import AssetType, RateSourceType, RecordStatus, TransactionDirection
-from investment_tracker.data.models import ExchangeRate, Position, Transaction, User
+from investment_tracker.data.enums import (
+    AllocationPolicy,
+    AssetType,
+    EventType,
+    FundingSourceType,
+    LotStatus,
+    RateSourceType,
+    RecordStatus,
+    TransactionDirection,
+)
+from investment_tracker.data.models import (
+    Attribution,
+    FundingLot,
+    LotConsumption,
+    PortfolioEvent,
+    ExchangeRate,
+    Position,
+    Transaction,
+    User,
+)
 
 
 def _build_session():
@@ -27,6 +45,10 @@ def test_all_tables_are_created() -> None:
         "exchange_rates",
         "investment_advice",
         "audit_logs",
+        "funding_lots",
+        "attributions",
+        "attribution_gaps",
+        "lot_consumptions",
     }.issubset(tables)
 
 
@@ -101,3 +123,134 @@ def test_exchange_rate_boolean_and_precision() -> None:
     assert stored.is_estimated is True
     assert Decimal(stored.rate) == Decimal("7.123456")
 
+
+def test_funding_lot_creation_persists_complete_basis_data() -> None:
+    session, _ = _build_session()
+    user = User(username="carol", email="carol@example.com")
+    session.add(user)
+    session.flush()
+    event = PortfolioEvent(
+        user_id=user.id,
+        event_type=EventType.FX_BUY,
+        event_time=datetime.now(timezone.utc),
+    )
+    session.add(event)
+    session.flush()
+
+    lot = FundingLot(
+        user_id=user.id,
+        currency="USD",
+        source_event_id=event.id,
+        source_type=FundingSourceType.FX_BUY,
+        original_amount=Decimal("1000.000000"),
+        remaining_amount=Decimal("1000.000000"),
+        original_rmb_basis=Decimal("7200.00"),
+        remaining_rmb_basis=Decimal("7200.00"),
+        status=LotStatus.AVAILABLE,
+    )
+    session.add(lot)
+    session.commit()
+
+    stored = session.query(FundingLot).one()
+    assert stored.source_event.event_type == EventType.FX_BUY
+    assert stored.currency == "USD"
+    assert Decimal(stored.original_amount) == Decimal("1000.000000")
+    assert Decimal(stored.remaining_amount) == Decimal("1000.000000")
+    assert Decimal(stored.original_rmb_basis) == Decimal("7200.00")
+    assert Decimal(stored.remaining_rmb_basis) == Decimal("7200.00")
+    assert stored.status == LotStatus.AVAILABLE
+
+
+def test_funding_lot_lifecycle_preserves_consumed_lot_record() -> None:
+    session, _ = _build_session()
+    user = User(username="dave", email="dave@example.com")
+    session.add(user)
+    session.flush()
+    source_event = PortfolioEvent(
+        user_id=user.id,
+        event_type=EventType.FX_BUY,
+        event_time=datetime.now(timezone.utc),
+    )
+    consuming_event = PortfolioEvent(
+        user_id=user.id,
+        event_type=EventType.FUND_BUY,
+        event_time=datetime.now(timezone.utc),
+    )
+    session.add_all([source_event, consuming_event])
+    session.flush()
+    lot = FundingLot(
+        user_id=user.id,
+        currency="USD",
+        source_event_id=source_event.id,
+        source_type=FundingSourceType.FX_BUY,
+        original_amount=Decimal("1000.000000"),
+        remaining_amount=Decimal("0.000000"),
+        original_rmb_basis=Decimal("7200.00"),
+        remaining_rmb_basis=Decimal("0.00"),
+        status=LotStatus.FULLY_CONSUMED,
+        fully_consumed_at=datetime.now(timezone.utc),
+    )
+    session.add(lot)
+    session.flush()
+    consumption = LotConsumption(
+        lot_id=lot.id,
+        consuming_event_id=consuming_event.id,
+        amount_consumed=Decimal("1000.000000"),
+        rmb_basis_consumed=Decimal("7200.00"),
+        remaining_after=Decimal("0.000000"),
+    )
+    session.add(consumption)
+    session.commit()
+
+    stored = session.query(FundingLot).one()
+    assert stored.status == LotStatus.FULLY_CONSUMED
+    assert Decimal(stored.remaining_amount) == Decimal("0.000000")
+    assert len(stored.consumptions) == 1
+    assert stored.consumptions[0].consuming_event.event_type == EventType.FUND_BUY
+
+
+def test_attribution_links_purchase_to_source_lot() -> None:
+    session, _ = _build_session()
+    user = User(username="erin", email="erin@example.com")
+    session.add(user)
+    session.flush()
+    source_event = PortfolioEvent(
+        user_id=user.id,
+        event_type=EventType.FX_BUY,
+        event_time=datetime.now(timezone.utc),
+    )
+    target_event = PortfolioEvent(
+        user_id=user.id,
+        event_type=EventType.WEALTH_BUY,
+        event_time=datetime.now(timezone.utc),
+    )
+    session.add_all([source_event, target_event])
+    session.flush()
+    lot = FundingLot(
+        user_id=user.id,
+        currency="USD",
+        source_event_id=source_event.id,
+        source_type=FundingSourceType.FX_BUY,
+        original_amount=Decimal("1000.000000"),
+        remaining_amount=Decimal("500.000000"),
+        original_rmb_basis=Decimal("7200.00"),
+        remaining_rmb_basis=Decimal("3600.00"),
+        status=LotStatus.AVAILABLE,
+    )
+    session.add(lot)
+    session.flush()
+    attribution = Attribution(
+        target_event_id=target_event.id,
+        source_lot_id=lot.id,
+        native_amount=Decimal("500.000000"),
+        rmb_basis=Decimal("3600.00"),
+        allocation_policy=AllocationPolicy.FIFO,
+    )
+    session.add(attribution)
+    session.commit()
+
+    stored = session.query(Attribution).one()
+    assert stored.target_event.event_type == EventType.WEALTH_BUY
+    assert stored.source_lot.source_event.event_type == EventType.FX_BUY
+    assert Decimal(stored.native_amount) == Decimal("500.000000")
+    assert Decimal(stored.rmb_basis) == Decimal("3600.00")

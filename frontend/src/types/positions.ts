@@ -9,6 +9,15 @@ export interface Position {
   quantity: number;
   average_cost_cny?: number | null;
   cost_basis_cny?: number | null;
+  legacy_cost_basis_cny?: number | null;
+  attributed_cost_basis_cny?: number | null;
+  attribution_status?: 'COMPLETE' | 'INCOMPLETE' | 'BASIS_MISSING' | 'NOT_APPLICABLE';
+  attribution_summary?: {
+    total_lots_used: number;
+    oldest_lot_date?: string | null;
+    newest_lot_date?: string | null;
+    gap_count: number;
+  };
   native_cost?: number | null;
   current_price?: number | null;
   current_value_native?: number | null;

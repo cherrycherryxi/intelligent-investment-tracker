@@ -5,10 +5,12 @@ from __future__ import annotations
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -19,8 +21,13 @@ from sqlalchemy.orm import relationship
 from investment_tracker.data.base import Base, TimestampMixin, utcnow
 from investment_tracker.data.enums import (
     AdviceAction,
+    AllocationPolicy,
     AssetType,
+    AttributionStatus,
     EventType,
+    FundingSourceType,
+    GapType,
+    LotStatus,
     RateSourceType,
     RecordStatus,
     TransactionDirection,
@@ -40,6 +47,8 @@ class User(TimestampMixin, Base):
     portfolio_events = relationship("PortfolioEvent", back_populates="user")
     advice_items = relationship("InvestmentAdvice", back_populates="user")
     audit_logs = relationship("AuditLog", back_populates="user")
+    funding_lots = relationship("FundingLot", back_populates="user")
+    attribution_gaps = relationship("AttributionGap", back_populates="user")
 
 
 class Asset(TimestampMixin, Base):
@@ -55,6 +64,8 @@ class Asset(TimestampMixin, Base):
 
     asset_ledger_entries = relationship("AssetLedgerEntry", back_populates="asset")
     valuation_snapshots = relationship("ValuationSnapshot", back_populates="asset")
+    attributions = relationship("Attribution", back_populates="target_asset")
+    attribution_gaps = relationship("AttributionGap", back_populates="asset")
 
 
 class Transaction(TimestampMixin, Base):
@@ -96,6 +107,26 @@ class PortfolioEvent(TimestampMixin, Base):
     user = relationship("User", back_populates="portfolio_events")
     cash_ledger_entries = relationship("CashLedgerEntry", back_populates="event")
     asset_ledger_entries = relationship("AssetLedgerEntry", back_populates="event")
+    source_funding_lots = relationship(
+        "FundingLot",
+        back_populates="source_event",
+        foreign_keys="FundingLot.source_event_id",
+    )
+    target_attributions = relationship(
+        "Attribution",
+        back_populates="target_event",
+        foreign_keys="Attribution.target_event_id",
+    )
+    attribution_gaps = relationship(
+        "AttributionGap",
+        back_populates="event",
+        foreign_keys="AttributionGap.event_id",
+    )
+    lot_consumptions = relationship(
+        "LotConsumption",
+        back_populates="consuming_event",
+        foreign_keys="LotConsumption.consuming_event_id",
+    )
 
 
 class CashLedgerEntry(Base):
@@ -215,3 +246,135 @@ class AuditLog(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     user = relationship("User", back_populates="audit_logs")
+
+
+class FundingLot(Base):
+    __tablename__ = "funding_lots"
+    __table_args__ = (
+        CheckConstraint("original_amount >= 0", name="ck_funding_lots_original_amount_non_negative"),
+        CheckConstraint("remaining_amount >= 0", name="ck_funding_lots_remaining_amount_non_negative"),
+        CheckConstraint(
+            "original_rmb_basis IS NULL OR original_rmb_basis >= 0",
+            name="ck_funding_lots_original_rmb_basis_non_negative",
+        ),
+        CheckConstraint(
+            "remaining_rmb_basis IS NULL OR remaining_rmb_basis >= 0",
+            name="ck_funding_lots_remaining_rmb_basis_non_negative",
+        ),
+        CheckConstraint(
+            "remaining_amount <= original_amount",
+            name="ck_funding_lots_remaining_amount_lte_original",
+        ),
+        Index("idx_funding_lots_user_currency", "user_id", "currency"),
+        Index("idx_funding_lots_source_event", "source_event_id"),
+        Index("idx_funding_lots_status", "status"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    currency = Column(String(16), nullable=False)
+    source_event_id = Column(Integer, ForeignKey("portfolio_events.id"), nullable=True)
+    source_type = Column(Enum(FundingSourceType), nullable=False)
+    original_amount = Column(Numeric(18, 6), nullable=False)
+    remaining_amount = Column(Numeric(18, 6), nullable=False)
+    original_rmb_basis = Column(Numeric(18, 2), nullable=True)
+    remaining_rmb_basis = Column(Numeric(18, 2), nullable=True)
+    status = Column(Enum(LotStatus), nullable=False, default=LotStatus.AVAILABLE)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    fully_consumed_at = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="funding_lots")
+    source_event = relationship(
+        "PortfolioEvent",
+        back_populates="source_funding_lots",
+        foreign_keys=[source_event_id],
+    )
+    attributions = relationship("Attribution", back_populates="source_lot")
+    consumptions = relationship("LotConsumption", back_populates="lot")
+
+
+class Attribution(Base):
+    __tablename__ = "attributions"
+    __table_args__ = (
+        CheckConstraint("native_amount >= 0", name="ck_attributions_native_amount_non_negative"),
+        CheckConstraint("rmb_basis >= 0", name="ck_attributions_rmb_basis_non_negative"),
+        Index("idx_attributions_target_event", "target_event_id"),
+        Index("idx_attributions_target_asset", "target_asset_id"),
+        Index("idx_attributions_source_lot", "source_lot_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    target_event_id = Column(Integer, ForeignKey("portfolio_events.id"), nullable=False)
+    target_asset_id = Column(Integer, ForeignKey("assets.id"), nullable=True)
+    source_lot_id = Column(Integer, ForeignKey("funding_lots.id"), nullable=False)
+    native_amount = Column(Numeric(18, 6), nullable=False)
+    rmb_basis = Column(Numeric(18, 2), nullable=False)
+    allocation_policy = Column(Enum(AllocationPolicy), nullable=False, default=AllocationPolicy.FIFO)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    target_event = relationship(
+        "PortfolioEvent",
+        back_populates="target_attributions",
+        foreign_keys=[target_event_id],
+    )
+    target_asset = relationship("Asset", back_populates="attributions")
+    source_lot = relationship("FundingLot", back_populates="attributions")
+
+
+class AttributionGap(Base):
+    __tablename__ = "attribution_gaps"
+    __table_args__ = (
+        CheckConstraint(
+            "shortfall_amount IS NULL OR shortfall_amount >= 0",
+            name="ck_attribution_gaps_shortfall_non_negative",
+        ),
+        Index("idx_attribution_gaps_user", "user_id"),
+        Index("idx_attribution_gaps_event", "event_id"),
+        Index("idx_attribution_gaps_status", "status"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    event_id = Column(Integer, ForeignKey("portfolio_events.id"), nullable=True)
+    asset_id = Column(Integer, ForeignKey("assets.id"), nullable=True)
+    gap_type = Column(Enum(GapType), nullable=False)
+    currency = Column(String(16), nullable=False)
+    shortfall_amount = Column(Numeric(18, 6), nullable=True)
+    status = Column(Enum(AttributionStatus), nullable=False, default=AttributionStatus.INCOMPLETE)
+    resolution_notes = Column(Text, nullable=True)
+    detected_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="attribution_gaps")
+    event = relationship(
+        "PortfolioEvent",
+        back_populates="attribution_gaps",
+        foreign_keys=[event_id],
+    )
+    asset = relationship("Asset", back_populates="attribution_gaps")
+
+
+class LotConsumption(Base):
+    __tablename__ = "lot_consumptions"
+    __table_args__ = (
+        CheckConstraint("amount_consumed >= 0", name="ck_lot_consumptions_amount_non_negative"),
+        CheckConstraint("rmb_basis_consumed >= 0", name="ck_lot_consumptions_rmb_basis_non_negative"),
+        CheckConstraint("remaining_after >= 0", name="ck_lot_consumptions_remaining_after_non_negative"),
+        Index("idx_lot_consumptions_lot", "lot_id"),
+        Index("idx_lot_consumptions_event", "consuming_event_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    lot_id = Column(Integer, ForeignKey("funding_lots.id"), nullable=False)
+    consuming_event_id = Column(Integer, ForeignKey("portfolio_events.id"), nullable=False)
+    amount_consumed = Column(Numeric(18, 6), nullable=False)
+    rmb_basis_consumed = Column(Numeric(18, 2), nullable=False)
+    remaining_after = Column(Numeric(18, 6), nullable=False)
+    consumed_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    lot = relationship("FundingLot", back_populates="consumptions")
+    consuming_event = relationship(
+        "PortfolioEvent",
+        back_populates="lot_consumptions",
+        foreign_keys=[consuming_event_id],
+    )

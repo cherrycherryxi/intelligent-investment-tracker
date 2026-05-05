@@ -65,9 +65,102 @@ class CashLedgerEntryRequest(BaseModel):
     currency: str
     amount_delta: float
     rmb_amount: Optional[float] = None
+    rmb_basis: Optional[float] = None
     fx_rate_to_cny: Optional[float] = None
     is_external_flow: bool = False
+    zero_basis: bool = False
+    unknown_basis: bool = False
+    basis_status: Optional[str] = None
     description: Optional[str] = None
+
+
+class AttributionSummary(BaseModel):
+    total_lots_used: int = 0
+    oldest_lot_date: Optional[datetime] = None
+    newest_lot_date: Optional[datetime] = None
+    gap_count: int = 0
+
+
+class FundingSourceDetail(BaseModel):
+    lot_id: int
+    source_event_id: Optional[int] = None
+    source_type: str
+    source_date: Optional[datetime] = None
+    source_currency: str
+    native_amount_allocated: float
+    rmb_basis_allocated: float
+    effective_rate: Optional[float] = None
+    lineage_depth: int = 0
+
+
+class PurchaseAttribution(BaseModel):
+    purchase_event_id: int
+    purchase_date: datetime
+    purchase_amount: float
+    funding_sources: List[FundingSourceDetail]
+
+
+class AttributionDetailResponse(BaseModel):
+    asset_id: int
+    asset_code: str
+    attribution_status: str
+    total_attributed_cost_cny: Optional[float] = None
+    attributions: List[PurchaseAttribution]
+    gaps: List[Dict[str, Any]]
+
+
+class PositionResponse(BaseModel):
+    asset_id: Optional[int] = None
+    asset_code: str
+    asset_type: str
+    currency: str
+    cost_basis_cny: Optional[float] = None
+    legacy_cost_basis_cny: Optional[float] = None
+    attributed_cost_basis_cny: Optional[float] = None
+    attribution_status: Optional[str] = None
+    attribution_summary: Optional[AttributionSummary] = None
+    investment_pnl_cny: Optional[float] = None
+    fx_pnl_cny: Optional[float] = None
+
+
+class GapDetail(BaseModel):
+    asset_id: Optional[int] = None
+    asset_code: Optional[str] = None
+    event_id: Optional[int] = None
+    gap_type: str
+    currency: str
+    shortfall_amount: Optional[float] = None
+    event_date: Optional[str] = None
+    suggestions: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class BasisMissingLot(BaseModel):
+    lot_id: int
+    currency: str
+    amount: float
+    source_event_id: Optional[int] = None
+    source_date: Optional[str] = None
+    suggestion: str
+
+
+class AttributionDiagnostics(BaseModel):
+    total_products: int
+    complete_attribution: int
+    incomplete_attribution: int
+    basis_missing: int
+    not_applicable: int
+    total_gaps: int
+    gap_details: List[GapDetail]
+    basis_missing_lots: List[BasisMissingLot]
+
+
+class AuditResponse(BaseModel):
+    audit_id: str
+    audit_time: str
+    user_id: int
+    currencies_audited: List[str]
+    summary: Dict[str, Any]
+    attribution_diagnostics: Optional[AttributionDiagnostics] = None
 
 
 class AssetLedgerEntryRequest(BaseModel):

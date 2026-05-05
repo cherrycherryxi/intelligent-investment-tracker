@@ -25,3 +25,7 @@ def test_alembic_upgrade_head(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     tables = set(inspect(engine).get_table_names())
     assert "transactions" in tables
     assert "positions" in tables
+    assert "funding_lots" in tables
+    assert "attributions" in tables
+    assert "attribution_gaps" in tables
+    assert "lot_consumptions" in tables

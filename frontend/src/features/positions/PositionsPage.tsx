@@ -39,6 +39,12 @@ function statusColor(status?: Position['valuation_status']) {
   return 'warning';
 }
 
+function attributionColor(status?: Position['attribution_status']) {
+  if (status === 'COMPLETE' || status === 'NOT_APPLICABLE') return 'success';
+  if (status === 'BASIS_MISSING') return 'error';
+  return 'warning';
+}
+
 function formatPositionCost(row: Position): string {
   if (row.currency && row.currency !== 'CNY' && row.native_cost !== null && row.native_cost !== undefined) {
     return `${formatNumber(row.native_cost, 6)} ${row.currency}`;
@@ -50,6 +56,29 @@ function formatPositionCost(row: Position): string {
     return `${formatNumber(row.native_cost, 6)} ${row.currency}`;
   }
   return '-';
+}
+
+function formatAttributionCost(row: Position): string {
+  if (row.attributed_cost_basis_cny !== null && row.attributed_cost_basis_cny !== undefined) {
+    return formatCurrency(row.attributed_cost_basis_cny);
+  }
+  return '-';
+}
+
+function formatLegacyCost(row: Position): string {
+  if (row.legacy_cost_basis_cny !== null && row.legacy_cost_basis_cny !== undefined) {
+    return formatCurrency(row.legacy_cost_basis_cny);
+  }
+  if (row.cost_basis_cny !== null && row.cost_basis_cny !== undefined) {
+    return formatCurrency(row.cost_basis_cny);
+  }
+  return '-';
+}
+
+function formatCostDiff(row: Position): string {
+  if (row.attributed_cost_basis_cny === null || row.attributed_cost_basis_cny === undefined) return '-';
+  if (row.legacy_cost_basis_cny === null || row.legacy_cost_basis_cny === undefined) return '-';
+  return formatCurrency(row.attributed_cost_basis_cny - row.legacy_cost_basis_cny);
 }
 
 function isAmountValuedPosition(row: Position): boolean {
@@ -131,7 +160,19 @@ export default function PositionsPage() {
     { key: 'asset_type', header: 'Type', render: (row: Position) => row.asset_type },
     { key: 'currency', header: 'Currency', render: (row: Position) => row.currency ?? '-' },
     { key: 'quantity', header: 'Quantity', align: 'right' as const, render: (row: Position) => formatNumber(row.quantity, 6) },
-    { key: 'cost_basis_cny', header: 'Cost', align: 'right' as const, render: (row: Position) => formatPositionCost(row) },
+    { key: 'native_cost', header: 'Native Cost', align: 'right' as const, render: (row: Position) => formatPositionCost(row) },
+    { key: 'attributed_cost_basis_cny', header: 'Attributed Cost', align: 'right' as const, render: (row: Position) => formatAttributionCost(row) },
+    { key: 'legacy_cost_basis_cny', header: 'Legacy Cost', align: 'right' as const, render: (row: Position) => formatLegacyCost(row) },
+    {
+      key: 'cost_diff',
+      header: 'Cost Diff',
+      align: 'right' as const,
+      render: (row: Position) => (
+        <Typography color={valueColor((row.attributed_cost_basis_cny ?? 0) - (row.legacy_cost_basis_cny ?? 0))}>
+          {formatCostDiff(row)}
+        </Typography>
+      ),
+    },
     { key: 'current_price', header: 'Price/Rate', align: 'right' as const, render: (row: Position) => formatNumber(row.current_price, 6) },
     { key: 'current_value_cny', header: 'Value', align: 'right' as const, render: (row: Position) => formatCurrency(row.current_value_cny) },
     {
@@ -180,6 +221,20 @@ export default function PositionsPage() {
       key: 'valuation_status',
       header: 'Status',
       render: (row: Position) => <Chip size="small" color={statusColor(row.valuation_status)} label={row.valuation_status ?? 'OK'} />,
+    },
+    {
+      key: 'attribution_status',
+      header: 'Attribution',
+      render: (row: Position) => (
+        <Stack spacing={0.5}>
+          <Chip size="small" color={attributionColor(row.attribution_status)} label={row.attribution_status ?? '-'} />
+          {row.attribution_summary ? (
+            <Typography variant="caption" color="text.secondary">
+              {row.attribution_summary.total_lots_used} lots · {row.attribution_summary.gap_count} gaps
+            </Typography>
+          ) : null}
+        </Stack>
+      ),
     },
     {
       key: 'actions',

@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
-from investment_tracker.data.enums import AssetType, EventType, RateSourceType, RecordStatus
+from investment_tracker.data.enums import (
+    AllocationPolicy,
+    AssetType,
+    AttributionStatus,
+    EventType,
+    FundingSourceType,
+    GapType,
+    LotStatus,
+    RateSourceType,
+    RecordStatus,
+)
 from investment_tracker.data.models import (
     AuditLog,
     Asset,
     AssetLedgerEntry,
+    Attribution,
+    AttributionGap,
     CashLedgerEntry,
     ExchangeRate,
+    FundingLot,
+    LotConsumption,
     PortfolioEvent,
     Position,
     Transaction,
@@ -25,6 +40,34 @@ from investment_tracker.mcp_tools.position_calculator_tool import PositionCalcul
 from investment_tracker.utils.backup import BackupService
 from sqlalchemy import case
 from sqlalchemy.orm import Session
+
+
+@dataclass(frozen=True)
+class LotAllocation:
+    lot_id: int
+    native_amount: Decimal
+    rmb_basis: Decimal
+    remaining_after: Decimal
+
+
+@dataclass(frozen=True)
+class AllocationResult:
+    allocations: List[LotAllocation]
+    rmb_cost: Decimal
+    shortfall_amount: Decimal
+    gap: Optional[AttributionGap] = None
+
+
+@dataclass(frozen=True)
+class AttributionNode:
+    lot_id: int
+    source_event_id: Optional[int]
+    source_type: FundingSourceType
+    source_currency: str
+    native_amount: Decimal
+    rmb_basis: Optional[Decimal]
+    remaining_amount: Decimal
+    depth: int
 
 
 class PortfolioService:
@@ -216,39 +259,50 @@ class PortfolioEventService:
         self.session.add(event)
         self.session.flush()
 
+        cash_entries: List[CashLedgerEntry] = []
         for item in payload.get("cash_entries", []):
-            self.session.add(
-                CashLedgerEntry(
-                    event_id=event.id,
-                    user_id=user_id,
-                    currency=str(item["currency"]).upper(),
-                    amount_delta=Decimal(str(item["amount_delta"])),
-                    rmb_amount=self._optional_decimal(item.get("rmb_amount")),
-                    fx_rate_to_cny=self._optional_decimal(item.get("fx_rate_to_cny")),
-                    is_external_flow=bool(item.get("is_external_flow", False)),
-                    description=item.get("description"),
-                )
+            cash_entry = CashLedgerEntry(
+                event_id=event.id,
+                user_id=user_id,
+                currency=str(item["currency"]).upper(),
+                amount_delta=Decimal(str(item["amount_delta"])),
+                rmb_amount=self._optional_decimal(item.get("rmb_amount")),
+                fx_rate_to_cny=self._optional_decimal(item.get("fx_rate_to_cny")),
+                is_external_flow=bool(item.get("is_external_flow", False)),
+                description=item.get("description"),
             )
+            self.session.add(cash_entry)
+            cash_entries.append(cash_entry)
 
+        asset_entries: List[AssetLedgerEntry] = []
         for item in payload.get("asset_entries", []):
             asset = self.session.get(Asset, int(item["asset_id"])) if item.get("asset_id") else None
             if asset is None and item.get("asset"):
                 asset = self.ensure_asset(item["asset"])
             if asset is None:
                 raise ValueError("asset_entries require asset_id or asset")
-            self.session.add(
-                AssetLedgerEntry(
-                    event_id=event.id,
-                    user_id=user_id,
-                    asset_id=asset.id,
-                    quantity_delta=Decimal(str(item["quantity_delta"])),
-                    cash_currency=str(item["cash_currency"]).upper(),
-                    cash_amount=self._optional_decimal(item.get("cash_amount")),
-                    unit_price=self._optional_decimal(item.get("unit_price")),
-                    fx_rate_to_cny=self._optional_decimal(item.get("fx_rate_to_cny")),
-                    description=item.get("description"),
-                )
+            asset_entry = AssetLedgerEntry(
+                event_id=event.id,
+                user_id=user_id,
+                asset_id=asset.id,
+                quantity_delta=Decimal(str(item["quantity_delta"])),
+                cash_currency=str(item["cash_currency"]).upper(),
+                cash_amount=self._optional_decimal(item.get("cash_amount")),
+                unit_price=self._optional_decimal(item.get("unit_price")),
+                fx_rate_to_cny=self._optional_decimal(item.get("fx_rate_to_cny")),
+                description=item.get("description"),
             )
+            self.session.add(asset_entry)
+            asset_entries.append(asset_entry)
+
+        self.session.flush()
+        self._process_funding_attribution(
+            user_id=user_id,
+            event=event,
+            cash_entries=cash_entries,
+            asset_entries=asset_entries,
+            raw_cash_payloads=payload.get("cash_entries", []),
+        )
 
         if commit:
             self.session.commit()
@@ -297,6 +351,981 @@ class PortfolioEventService:
 
     def _status(self, value: Any) -> RecordStatus:
         return value if isinstance(value, RecordStatus) else RecordStatus[str(value)]
+
+    def _process_funding_attribution(
+        self,
+        *,
+        user_id: int,
+        event: PortfolioEvent,
+        cash_entries: List[CashLedgerEntry],
+        asset_entries: List[AssetLedgerEntry],
+        raw_cash_payloads: List[Dict[str, Any]],
+    ) -> None:
+        if event.status != RecordStatus.CONFIRMED:
+            return
+        if event.event_type == EventType.FX_BUY:
+            self._create_fx_buy_lots(user_id=user_id, event=event, cash_entries=cash_entries)
+        elif event.event_type == EventType.FX_SWAP:
+            self._create_fx_swap_lots(user_id=user_id, event=event, cash_entries=cash_entries)
+        elif event.event_type in {
+            EventType.FUND_SELL,
+            EventType.WEALTH_REDEEM,
+            EventType.FUND_DIVIDEND,
+            EventType.WEALTH_INCOME,
+            EventType.INTEREST_INCOME,
+        }:
+            self._create_income_or_redemption_lots(
+                user_id=user_id,
+                event=event,
+                cash_entries=cash_entries,
+                asset_entries=asset_entries,
+            )
+        elif event.event_type == EventType.MANUAL_ADJUSTMENT:
+            self._create_manual_adjustment_lots(
+                user_id=user_id,
+                event=event,
+                cash_entries=cash_entries,
+                raw_cash_payloads=raw_cash_payloads,
+            )
+        elif event.event_type in {EventType.FUND_BUY, EventType.WEALTH_BUY, EventType.BOND_BUY}:
+            self._attribute_asset_purchase(user_id=user_id, event=event, asset_entries=asset_entries)
+
+    def _create_fx_buy_lots(
+        self,
+        *,
+        user_id: int,
+        event: PortfolioEvent,
+        cash_entries: List[CashLedgerEntry],
+    ) -> None:
+        manager = FundingLotManager(self.session)
+        for entry in self._positive_foreign_cash_entries(cash_entries):
+            manager.create_lot(
+                user_id=user_id,
+                currency=entry.currency,
+                native_amount=Decimal(str(entry.amount_delta)),
+                rmb_basis=self._cash_entry_basis(entry),
+                source_event_id=event.id,
+                source_type=FundingSourceType.FX_BUY,
+                created_at=event.event_time,
+            )
+
+    def _create_fx_swap_lots(
+        self,
+        *,
+        user_id: int,
+        event: PortfolioEvent,
+        cash_entries: List[CashLedgerEntry],
+    ) -> None:
+        negative_entries = [
+            entry
+            for entry in cash_entries
+            if entry.currency != "CNY" and Decimal(str(entry.amount_delta)) < 0
+        ]
+        positive_entries = self._positive_foreign_cash_entries(cash_entries)
+        if not negative_entries or not positive_entries:
+            return
+
+        manager = FundingLotManager(self.session)
+        allocation_engine = LotAllocationEngine(self.session, lot_manager=manager)
+        source_entry = negative_entries[0]
+        target_entry = positive_entries[0]
+        result = allocation_engine.allocate(
+            user_id=user_id,
+            currency=source_entry.currency,
+            amount_needed=abs(Decimal(str(source_entry.amount_delta))),
+            consuming_event_id=event.id,
+            allocation_time=event.event_time,
+        )
+        manager.create_lot(
+            user_id=user_id,
+            currency=target_entry.currency,
+            native_amount=Decimal(str(target_entry.amount_delta)),
+            rmb_basis=result.rmb_cost if result.shortfall_amount == 0 else None,
+            source_event_id=event.id,
+            source_type=FundingSourceType.FX_SWAP,
+            created_at=event.event_time,
+        )
+
+    def _create_income_or_redemption_lots(
+        self,
+        *,
+        user_id: int,
+        event: PortfolioEvent,
+        cash_entries: List[CashLedgerEntry],
+        asset_entries: List[AssetLedgerEntry],
+    ) -> None:
+        source_type = (
+            FundingSourceType.INTEREST
+            if event.event_type in {EventType.INTEREST_INCOME, EventType.WEALTH_INCOME}
+            else FundingSourceType.DIVIDEND
+            if event.event_type == EventType.FUND_DIVIDEND
+            else FundingSourceType.REDEMPTION
+        )
+        attributed_basis_by_currency = self._reduce_asset_attributions_for_redemption(asset_entries)
+        asset_basis_by_currency = self._asset_redemption_basis_by_currency(asset_entries)
+        manager = FundingLotManager(self.session)
+        for entry in self._positive_foreign_cash_entries(cash_entries):
+            manager.create_lot(
+                user_id=user_id,
+                currency=entry.currency,
+                native_amount=Decimal(str(entry.amount_delta)),
+                rmb_basis=(
+                    attributed_basis_by_currency.get(entry.currency)
+                    or asset_basis_by_currency.get(entry.currency)
+                    or self._cash_entry_basis(entry)
+                ),
+                source_event_id=event.id,
+                source_type=source_type,
+                created_at=event.event_time,
+            )
+
+    def _create_manual_adjustment_lots(
+        self,
+        *,
+        user_id: int,
+        event: PortfolioEvent,
+        cash_entries: List[CashLedgerEntry],
+        raw_cash_payloads: List[Dict[str, Any]],
+    ) -> None:
+        manager = FundingLotManager(self.session)
+        for index, entry in enumerate(cash_entries):
+            if entry.currency == "CNY" or Decimal(str(entry.amount_delta)) <= 0:
+                continue
+            raw = raw_cash_payloads[index] if index < len(raw_cash_payloads) else {}
+            basis = self._manual_adjustment_basis(raw)
+            manager.create_lot(
+                user_id=user_id,
+                currency=entry.currency,
+                native_amount=Decimal(str(entry.amount_delta)),
+                rmb_basis=basis,
+                source_event_id=event.id,
+                source_type=FundingSourceType.MANUAL_ADJUSTMENT,
+                created_at=event.event_time,
+            )
+
+    def _positive_foreign_cash_entries(self, cash_entries: List[CashLedgerEntry]) -> List[CashLedgerEntry]:
+        return [
+            entry
+            for entry in cash_entries
+            if entry.currency != "CNY" and Decimal(str(entry.amount_delta)) > 0
+        ]
+
+    def _cash_entry_basis(self, entry: CashLedgerEntry) -> Optional[Decimal]:
+        if entry.rmb_amount is not None:
+            return abs(Decimal(str(entry.rmb_amount)))
+        if entry.fx_rate_to_cny is not None:
+            return abs(Decimal(str(entry.amount_delta))) * Decimal(str(entry.fx_rate_to_cny))
+        return None
+
+    def _asset_redemption_basis_by_currency(
+        self,
+        asset_entries: List[AssetLedgerEntry],
+    ) -> Dict[str, Decimal]:
+        basis_by_currency: Dict[str, Decimal] = {}
+        for entry in asset_entries:
+            if Decimal(str(entry.quantity_delta)) >= 0:
+                continue
+            if entry.cash_amount is None or entry.fx_rate_to_cny is None:
+                continue
+            basis_by_currency[entry.cash_currency] = (
+                basis_by_currency.get(entry.cash_currency, Decimal("0"))
+                + abs(Decimal(str(entry.cash_amount))) * Decimal(str(entry.fx_rate_to_cny))
+            )
+        return basis_by_currency
+
+    def _manual_adjustment_basis(self, raw: Dict[str, Any]) -> Optional[Decimal]:
+        if "rmb_basis" in raw:
+            return self._optional_decimal(raw.get("rmb_basis"))
+        if raw.get("rmb_amount") not in (None, ""):
+            return self._optional_decimal(raw.get("rmb_amount"))
+        if bool(raw.get("zero_basis")):
+            return Decimal("0")
+        if bool(raw.get("unknown_basis")) or str(raw.get("basis_status", "")).upper() == "UNKNOWN":
+            return None
+        raise ValueError("MANUAL_ADJUSTMENT foreign inflow requires rmb_basis, zero_basis, or unknown_basis")
+
+    def _reduce_asset_attributions_for_redemption(
+        self,
+        asset_entries: List[AssetLedgerEntry],
+    ) -> Dict[str, Decimal]:
+        basis_by_currency: Dict[str, Decimal] = {}
+        for entry in asset_entries:
+            if Decimal(str(entry.quantity_delta)) >= 0:
+                continue
+            if entry.cash_amount is None:
+                continue
+            amount_to_reduce = abs(Decimal(str(entry.cash_amount)))
+            rows = (
+                self.session.query(Attribution)
+                .join(PortfolioEvent, PortfolioEvent.id == Attribution.target_event_id)
+                .filter(Attribution.target_asset_id == entry.asset_id)
+                .order_by(PortfolioEvent.event_time.asc(), Attribution.id.asc())
+                .all()
+            )
+            consumed_basis = Decimal("0.00")
+            for attribution in rows:
+                if amount_to_reduce <= 0:
+                    break
+                native_amount = Decimal(str(attribution.native_amount))
+                if native_amount <= 0:
+                    continue
+                rmb_basis = Decimal(str(attribution.rmb_basis))
+                native_consumed = min(native_amount, amount_to_reduce)
+                if native_consumed == native_amount:
+                    basis_consumed = rmb_basis
+                else:
+                    basis_consumed = (rmb_basis * native_consumed / native_amount).quantize(
+                        FundingLotManager.BASIS_QUANT,
+                        rounding=ROUND_HALF_UP,
+                    )
+                attribution.native_amount = (native_amount - native_consumed).quantize(
+                    FundingLotManager.AMOUNT_QUANT
+                )
+                attribution.rmb_basis = (rmb_basis - basis_consumed).quantize(
+                    FundingLotManager.BASIS_QUANT,
+                    rounding=ROUND_HALF_UP,
+                )
+                consumed_basis += basis_consumed
+                amount_to_reduce -= native_consumed
+            if consumed_basis:
+                basis_by_currency[entry.cash_currency] = (
+                    basis_by_currency.get(entry.cash_currency, Decimal("0.00")) + consumed_basis
+                )
+        return basis_by_currency
+
+    def _attribute_asset_purchase(
+        self,
+        *,
+        user_id: int,
+        event: PortfolioEvent,
+        asset_entries: List[AssetLedgerEntry],
+    ) -> None:
+        allocation_engine = LotAllocationEngine(self.session)
+        attribution_store = AttributionStore(self.session)
+        for entry in asset_entries:
+            if entry.cash_currency == "CNY" or Decimal(str(entry.quantity_delta)) <= 0:
+                continue
+            if entry.cash_amount is None:
+                continue
+            amount_needed = abs(Decimal(str(entry.cash_amount)))
+            result = allocation_engine.allocate(
+                user_id=user_id,
+                currency=entry.cash_currency,
+                amount_needed=amount_needed,
+                consuming_event_id=event.id,
+                allocation_time=event.event_time,
+                target_asset_id=entry.asset_id,
+            )
+            for allocation in result.allocations:
+                attribution_store.record_allocation(
+                    target_event_id=event.id,
+                    target_asset_id=entry.asset_id,
+                    source_lot_id=allocation.lot_id,
+                    native_amount=allocation.native_amount,
+                    rmb_basis=allocation.rmb_basis,
+                )
+
+
+class FundingLotManager:
+    """Create and consume provenance-aware foreign-currency funding lots."""
+
+    BASIS_QUANT = Decimal("0.01")
+    AMOUNT_QUANT = Decimal("0.000001")
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def create_lot(
+        self,
+        *,
+        user_id: int,
+        currency: str,
+        native_amount: Decimal,
+        rmb_basis: Optional[Decimal],
+        source_event_id: Optional[int],
+        source_type: FundingSourceType,
+        created_at: Optional[datetime] = None,
+    ) -> FundingLot:
+        amount = self._decimal(native_amount)
+        basis = self._optional_decimal(rmb_basis)
+        if amount < 0:
+            raise ValueError("native_amount must be non-negative")
+        if basis is not None and basis < 0:
+            raise ValueError("rmb_basis must be non-negative")
+        source_type = (
+            source_type
+            if isinstance(source_type, FundingSourceType)
+            else FundingSourceType[str(source_type)]
+        )
+
+        lot = FundingLot(
+            user_id=user_id,
+            currency=currency.upper(),
+            source_event_id=source_event_id,
+            source_type=source_type,
+            original_amount=amount,
+            remaining_amount=amount,
+            original_rmb_basis=basis,
+            remaining_rmb_basis=basis,
+            status=LotStatus.BASIS_MISSING if basis is None else LotStatus.AVAILABLE,
+            created_at=created_at or datetime.now(timezone.utc),
+        )
+        self.session.add(lot)
+        self.session.flush()
+        return lot
+
+    def get_available_lots(
+        self,
+        *,
+        user_id: int,
+        currency: str,
+        as_of_time: Optional[datetime] = None,
+    ) -> List[FundingLot]:
+        query = self.session.query(FundingLot).filter(
+            FundingLot.user_id == user_id,
+            FundingLot.currency == currency.upper(),
+            FundingLot.status == LotStatus.AVAILABLE,
+            FundingLot.remaining_amount > 0,
+        )
+        if as_of_time is not None:
+            query = query.filter(FundingLot.created_at <= as_of_time)
+        return query.order_by(FundingLot.created_at.asc(), FundingLot.id.asc()).all()
+
+    def consume_lot(
+        self,
+        *,
+        lot_id: int,
+        amount_consumed: Decimal,
+        consuming_event_id: int,
+        consumed_at: Optional[datetime] = None,
+    ) -> LotConsumption:
+        amount = self._decimal(amount_consumed)
+        if amount <= 0:
+            raise ValueError("amount_consumed must be positive")
+
+        lot = self.session.get(FundingLot, lot_id)
+        if lot is None:
+            raise ValueError(f"funding lot {lot_id} not found")
+        if lot.status != LotStatus.AVAILABLE:
+            raise ValueError(f"funding lot {lot_id} is not available")
+
+        remaining_amount = self._decimal(lot.remaining_amount)
+        if amount > remaining_amount:
+            raise ValueError("amount_consumed exceeds remaining_amount")
+        if lot.remaining_rmb_basis is None:
+            raise ValueError("funding lot is missing RMB basis")
+
+        remaining_basis = self._decimal(lot.remaining_rmb_basis)
+        if amount == remaining_amount:
+            basis_consumed = remaining_basis
+        else:
+            basis_consumed = (remaining_basis * amount / remaining_amount).quantize(
+                self.BASIS_QUANT,
+                rounding=ROUND_HALF_UP,
+            )
+
+        lot.remaining_amount = (remaining_amount - amount).quantize(self.AMOUNT_QUANT)
+        lot.remaining_rmb_basis = (remaining_basis - basis_consumed).quantize(
+            self.BASIS_QUANT,
+            rounding=ROUND_HALF_UP,
+        )
+        if lot.remaining_amount == Decimal("0.000000"):
+            lot.status = LotStatus.FULLY_CONSUMED
+            lot.fully_consumed_at = consumed_at or datetime.now(timezone.utc)
+            lot.remaining_rmb_basis = Decimal("0.00")
+
+        consumption = LotConsumption(
+            lot_id=lot.id,
+            consuming_event_id=consuming_event_id,
+            amount_consumed=amount,
+            rmb_basis_consumed=basis_consumed,
+            remaining_after=lot.remaining_amount,
+            consumed_at=consumed_at or datetime.now(timezone.utc),
+        )
+        self.session.add(consumption)
+        self.session.flush()
+        return consumption
+
+    def mark_lot_status(self, *, lot_id: int, status: LotStatus) -> FundingLot:
+        lot = self.session.get(FundingLot, lot_id)
+        if lot is None:
+            raise ValueError(f"funding lot {lot_id} not found")
+        status = status if isinstance(status, LotStatus) else LotStatus[str(status)]
+        lot.status = status
+        if status == LotStatus.FULLY_CONSUMED and lot.fully_consumed_at is None:
+            lot.fully_consumed_at = datetime.now(timezone.utc)
+        self.session.flush()
+        return lot
+
+    def _decimal(self, value: Any) -> Decimal:
+        return Decimal(str(value))
+
+    def _optional_decimal(self, value: Any) -> Optional[Decimal]:
+        if value in (None, ""):
+            return None
+        return Decimal(str(value))
+
+
+class LotAllocationEngine:
+    """Allocate product funding from available same-currency lots."""
+
+    AMOUNT_QUANT = Decimal("0.000001")
+    BASIS_QUANT = Decimal("0.01")
+
+    def __init__(self, session: Session, *, lot_manager: Optional[FundingLotManager] = None) -> None:
+        self.session = session
+        self.lot_manager = lot_manager or FundingLotManager(session)
+
+    def allocate(
+        self,
+        *,
+        user_id: int,
+        currency: str,
+        amount_needed: Decimal,
+        consuming_event_id: int,
+        allocation_time: datetime,
+        policy: AllocationPolicy = AllocationPolicy.FIFO,
+        target_asset_id: Optional[int] = None,
+    ) -> AllocationResult:
+        policy = policy if isinstance(policy, AllocationPolicy) else AllocationPolicy[str(policy)]
+        if policy != AllocationPolicy.FIFO:
+            raise NotImplementedError("only FIFO allocation is implemented")
+
+        remaining_needed = Decimal(str(amount_needed))
+        if remaining_needed <= 0:
+            raise ValueError("amount_needed must be positive")
+
+        allocations: List[LotAllocation] = []
+        for lot in self.lot_manager.get_available_lots(
+            user_id=user_id,
+            currency=currency,
+            as_of_time=allocation_time,
+        ):
+            if remaining_needed <= 0:
+                break
+            available = Decimal(str(lot.remaining_amount))
+            amount_to_consume = min(available, remaining_needed).quantize(self.AMOUNT_QUANT)
+            consumption = self.lot_manager.consume_lot(
+                lot_id=lot.id,
+                amount_consumed=amount_to_consume,
+                consuming_event_id=consuming_event_id,
+                consumed_at=allocation_time,
+            )
+            allocations.append(
+                LotAllocation(
+                    lot_id=lot.id,
+                    native_amount=Decimal(str(consumption.amount_consumed)),
+                    rmb_basis=Decimal(str(consumption.rmb_basis_consumed)),
+                    remaining_after=Decimal(str(consumption.remaining_after)),
+                )
+            )
+            remaining_needed = (remaining_needed - amount_to_consume).quantize(self.AMOUNT_QUANT)
+
+        shortfall = max(remaining_needed, Decimal("0.000000")).quantize(self.AMOUNT_QUANT)
+        gap = None
+        if shortfall > 0:
+            gap = self.create_gap_record(
+                user_id=user_id,
+                currency=currency,
+                shortfall_amount=shortfall,
+                event_id=consuming_event_id,
+                asset_id=target_asset_id,
+                detected_at=allocation_time,
+            )
+
+        result = AllocationResult(
+            allocations=allocations,
+            rmb_cost=self.compute_rmb_cost(allocations),
+            shortfall_amount=shortfall,
+            gap=gap,
+        )
+        self.session.flush()
+        return result
+
+    def compute_rmb_cost(self, allocations: List[LotAllocation]) -> Decimal:
+        return sum((allocation.rmb_basis for allocation in allocations), Decimal("0.00")).quantize(
+            self.BASIS_QUANT,
+            rounding=ROUND_HALF_UP,
+        )
+
+    def create_gap_record(
+        self,
+        *,
+        user_id: int,
+        currency: str,
+        shortfall_amount: Decimal,
+        event_id: int,
+        asset_id: Optional[int] = None,
+        detected_at: Optional[datetime] = None,
+    ) -> AttributionGap:
+        shortfall = Decimal(str(shortfall_amount))
+        if shortfall <= 0:
+            raise ValueError("shortfall_amount must be positive")
+        gap = AttributionGap(
+            user_id=user_id,
+            event_id=event_id,
+            asset_id=asset_id,
+            gap_type=GapType.UNATTRIBUTED_FUNDING,
+            currency=currency.upper(),
+            shortfall_amount=shortfall,
+            status=AttributionStatus.INCOMPLETE,
+            detected_at=detected_at or datetime.now(timezone.utc),
+        )
+        self.session.add(gap)
+        self.session.flush()
+        return gap
+
+
+class AttributionStore:
+    """Persist and query funding attribution lineage."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def record_allocation(
+        self,
+        *,
+        target_event_id: int,
+        target_asset_id: Optional[int],
+        source_lot_id: int,
+        native_amount: Decimal,
+        rmb_basis: Decimal,
+        allocation_policy: AllocationPolicy = AllocationPolicy.FIFO,
+    ) -> Attribution:
+        allocation_policy = (
+            allocation_policy
+            if isinstance(allocation_policy, AllocationPolicy)
+            else AllocationPolicy[str(allocation_policy)]
+        )
+        attribution = Attribution(
+            target_event_id=target_event_id,
+            target_asset_id=target_asset_id,
+            source_lot_id=source_lot_id,
+            native_amount=Decimal(str(native_amount)),
+            rmb_basis=Decimal(str(rmb_basis)),
+            allocation_policy=allocation_policy,
+        )
+        self.session.add(attribution)
+        self.session.flush()
+        return attribution
+
+    def get_attributions_for_event(self, *, event_id: int) -> List[Attribution]:
+        return (
+            self.session.query(Attribution)
+            .filter(Attribution.target_event_id == event_id)
+            .order_by(Attribution.id.asc())
+            .all()
+        )
+
+    def get_attributions_for_asset(self, *, asset_id: int) -> List[Attribution]:
+        return (
+            self.session.query(Attribution)
+            .filter(Attribution.target_asset_id == asset_id)
+            .order_by(Attribution.id.asc())
+            .all()
+        )
+
+    def trace_to_origin(self, *, attribution_id: int, max_depth: int = 10) -> List[AttributionNode]:
+        attribution = self.session.get(Attribution, attribution_id)
+        if attribution is None:
+            raise ValueError(f"attribution {attribution_id} not found")
+        if max_depth < 1:
+            raise ValueError("max_depth must be at least 1")
+        return self._trace_lot(
+            lot_id=attribution.source_lot_id,
+            native_amount=Decimal(str(attribution.native_amount)),
+            rmb_basis=Decimal(str(attribution.rmb_basis)),
+            depth=0,
+            max_depth=max_depth,
+            visited_lot_ids=set(),
+        )
+
+    def _trace_lot(
+        self,
+        *,
+        lot_id: int,
+        native_amount: Decimal,
+        rmb_basis: Optional[Decimal],
+        depth: int,
+        max_depth: int,
+        visited_lot_ids: set[int],
+    ) -> List[AttributionNode]:
+        if depth >= max_depth:
+            raise ValueError("attribution trace exceeded max_depth")
+        if lot_id in visited_lot_ids:
+            raise ValueError("cycle detected in attribution trace")
+        visited_lot_ids.add(lot_id)
+
+        lot = self.session.get(FundingLot, lot_id)
+        if lot is None:
+            raise ValueError(f"funding lot {lot_id} not found")
+
+        node = AttributionNode(
+            lot_id=lot.id,
+            source_event_id=lot.source_event_id,
+            source_type=lot.source_type,
+            source_currency=lot.currency,
+            native_amount=native_amount,
+            rmb_basis=rmb_basis,
+            remaining_amount=Decimal(str(lot.remaining_amount)),
+            depth=depth,
+        )
+
+        if lot.source_event_id is None:
+            visited_lot_ids.remove(lot_id)
+            return [node]
+
+        upstream_consumptions = (
+            self.session.query(LotConsumption)
+            .filter(LotConsumption.consuming_event_id == lot.source_event_id)
+            .order_by(LotConsumption.id.asc())
+            .all()
+        )
+        if not upstream_consumptions:
+            visited_lot_ids.remove(lot_id)
+            return [node]
+
+        nodes = [node]
+        for consumption in upstream_consumptions:
+            nodes.extend(
+                self._trace_lot(
+                    lot_id=consumption.lot_id,
+                    native_amount=Decimal(str(consumption.amount_consumed)),
+                    rmb_basis=Decimal(str(consumption.rmb_basis_consumed)),
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    visited_lot_ids=visited_lot_ids,
+                )
+            )
+        visited_lot_ids.remove(lot_id)
+        return nodes
+
+
+class AttributionStatusTracker:
+    """Compute attribution completeness and gap remediation hints for assets."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def compute_status(self, *, asset_id: int, user_id: int) -> AttributionStatus:
+        asset = self.session.get(Asset, asset_id)
+        if asset is not None and asset.currency.upper() == "CNY":
+            return AttributionStatus.NOT_APPLICABLE
+
+        gaps = self.get_gaps(asset_id=asset_id)
+        if any(gap.gap_type == GapType.BASIS_MISSING for gap in gaps):
+            return AttributionStatus.BASIS_MISSING
+        if self._has_basis_missing_source_lot(asset_id=asset_id):
+            return AttributionStatus.BASIS_MISSING
+
+        attributions = (
+            self.session.query(Attribution)
+            .filter(Attribution.target_asset_id == asset_id)
+            .join(PortfolioEvent, PortfolioEvent.id == Attribution.target_event_id)
+            .filter(PortfolioEvent.user_id == user_id)
+            .all()
+        )
+        if gaps:
+            return AttributionStatus.INCOMPLETE
+        if attributions:
+            return AttributionStatus.COMPLETE
+        return AttributionStatus.INCOMPLETE
+
+    def get_gaps(self, *, asset_id: int) -> List[AttributionGap]:
+        return (
+            self.session.query(AttributionGap)
+            .filter(AttributionGap.asset_id == asset_id, AttributionGap.resolved_at.is_(None))
+            .order_by(AttributionGap.detected_at.asc(), AttributionGap.id.asc())
+            .all()
+        )
+
+    def suggest_corrections(self, *, gap: AttributionGap) -> List[Dict[str, Any]]:
+        if gap.gap_type == GapType.UNATTRIBUTED_FUNDING:
+            return [
+                {
+                    "action": "CREATE_MANUAL_ADJUSTMENT",
+                    "message": (
+                        f"Create a {gap.currency} manual adjustment for "
+                        f"{self._to_display_decimal(gap.shortfall_amount)} with explicit RMB basis."
+                    ),
+                    "currency": gap.currency,
+                    "amount": self._to_display_decimal(gap.shortfall_amount),
+                }
+            ]
+        if gap.gap_type == GapType.BASIS_MISSING:
+            return [
+                {
+                    "action": "ADD_RMB_BASIS",
+                    "message": f"Add RMB basis or historical FX rate for {gap.currency} funding source.",
+                    "currency": gap.currency,
+                    "amount": self._to_display_decimal(gap.shortfall_amount),
+                }
+            ]
+        if gap.gap_type == GapType.POLICY_CONFLICT:
+            return [
+                {
+                    "action": "REBUILD_ATTRIBUTION",
+                    "message": "Rebuild attribution records with the configured allocation policy.",
+                    "currency": gap.currency,
+                    "amount": self._to_display_decimal(gap.shortfall_amount),
+                }
+            ]
+        return []
+
+    def _has_basis_missing_source_lot(self, *, asset_id: int) -> bool:
+        return (
+            self.session.query(Attribution)
+            .join(FundingLot, FundingLot.id == Attribution.source_lot_id)
+            .filter(Attribution.target_asset_id == asset_id)
+            .filter(
+                (FundingLot.status == LotStatus.BASIS_MISSING)
+                | (FundingLot.original_rmb_basis.is_(None))
+                | (FundingLot.remaining_rmb_basis.is_(None))
+            )
+            .first()
+            is not None
+        )
+
+    def _to_display_decimal(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        return float(Decimal(str(value)))
+
+
+class PerformanceCalculator:
+    """Product-level performance calculations using attribution-aware cost basis."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get_attributed_cost_basis(self, *, asset_id: int, user_id: int) -> Optional[Decimal]:
+        rows = (
+            self.session.query(Attribution)
+            .join(PortfolioEvent, PortfolioEvent.id == Attribution.target_event_id)
+            .filter(Attribution.target_asset_id == asset_id, PortfolioEvent.user_id == user_id)
+            .all()
+        )
+        if not rows:
+            return None
+        return sum((Decimal(str(row.rmb_basis)) for row in rows), Decimal("0.00")).quantize(
+            FundingLotManager.BASIS_QUANT,
+            rounding=ROUND_HALF_UP,
+        )
+
+    def get_native_cost_basis(self, *, asset_id: int, user_id: int) -> Decimal:
+        rows = (
+            self.session.query(Attribution)
+            .join(PortfolioEvent, PortfolioEvent.id == Attribution.target_event_id)
+            .filter(Attribution.target_asset_id == asset_id, PortfolioEvent.user_id == user_id)
+            .all()
+        )
+        if rows:
+            return sum((Decimal(str(row.native_amount)) for row in rows), Decimal("0.000000"))
+
+        legacy_rows = (
+            self.session.query(AssetLedgerEntry)
+            .filter(AssetLedgerEntry.asset_id == asset_id, AssetLedgerEntry.user_id == user_id)
+            .all()
+        )
+        native_cost = Decimal("0.000000")
+        for row in legacy_rows:
+            if row.cash_amount is None:
+                continue
+            quantity_delta = Decimal(str(row.quantity_delta))
+            amount = abs(Decimal(str(row.cash_amount)))
+            native_cost += amount if quantity_delta > 0 else -amount
+        return native_cost
+
+    def compute_product_performance(
+        self,
+        *,
+        asset_id: int,
+        user_id: int,
+        current_native_value: Decimal,
+        current_fx_rate: Decimal,
+    ) -> Dict[str, Any]:
+        native_value = Decimal(str(current_native_value))
+        rate = Decimal(str(current_fx_rate))
+        native_cost = self.get_native_cost_basis(asset_id=asset_id, user_id=user_id)
+        attributed_cost = self.get_attributed_cost_basis(asset_id=asset_id, user_id=user_id)
+        attribution_status = AttributionStatusTracker(self.session).compute_status(
+            asset_id=asset_id,
+            user_id=user_id,
+        )
+        current_value_cny = native_value * rate
+        investment_pnl_cny = (native_value - native_cost) * rate
+        total_pnl_cny = None
+        fx_pnl_cny = None
+        if attributed_cost is not None and attribution_status == AttributionStatus.COMPLETE:
+            total_pnl_cny = current_value_cny - attributed_cost
+            fx_pnl_cny = total_pnl_cny - investment_pnl_cny
+
+        return {
+            "asset_id": asset_id,
+            "attribution_status": attribution_status.value,
+            "native_cost": self._to_float(native_cost, "0.000001"),
+            "current_native_value": self._to_float(native_value, "0.000001"),
+            "current_value_cny": self._to_float(current_value_cny, "0.01"),
+            "attributed_cost_basis_cny": self._to_float(attributed_cost, "0.01") if attributed_cost is not None else None,
+            "total_pnl_cny": self._to_float(total_pnl_cny, "0.01") if total_pnl_cny is not None else None,
+            "investment_pnl_cny": self._to_float(investment_pnl_cny, "0.01"),
+            "fx_pnl_cny": self._to_float(fx_pnl_cny, "0.01") if fx_pnl_cny is not None else None,
+            "return_pct": self._to_float(
+                ((native_value - native_cost) / native_cost * Decimal("100")) if native_cost else Decimal("0"),
+                "0.0001",
+            ),
+        }
+
+    def _to_float(self, value: Optional[Decimal], pattern: str) -> float:
+        if value is None:
+            return 0.0
+        return float(value.quantize(Decimal(pattern), rounding=ROUND_HALF_UP))
+
+
+class AttributionRebuildService:
+    """Rebuild funding lots, consumptions, attributions, and gaps from existing events."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def rebuild_user_attribution(
+        self,
+        *,
+        user_id: int,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        event_query = self.session.query(PortfolioEvent).filter(PortfolioEvent.user_id == user_id)
+        if start_date is not None:
+            event_query = event_query.filter(PortfolioEvent.event_time >= start_date)
+        if end_date is not None:
+            event_query = event_query.filter(PortfolioEvent.event_time <= end_date)
+        events = event_query.order_by(PortfolioEvent.event_time.asc(), PortfolioEvent.id.asc()).all()
+
+        impacted_asset_ids = sorted(
+            {
+                entry.asset_id
+                for event in events
+                for entry in event.asset_ledger_entries
+                if entry.asset_id is not None
+            }
+        )
+        existing_counts = self._derived_counts(user_id=user_id)
+        if dry_run:
+            return {
+                "dry_run": True,
+                "events_to_replay": len(events),
+                "impacted_asset_ids": impacted_asset_ids,
+                "existing_records_to_clear": existing_counts,
+            }
+
+        self._clear_user_attribution(user_id=user_id)
+        processor = PortfolioEventService(self.session)
+        replayed = 0
+        for event in events:
+            processor._process_funding_attribution(
+                user_id=user_id,
+                event=event,
+                cash_entries=list(event.cash_ledger_entries),
+                asset_entries=list(event.asset_ledger_entries),
+                raw_cash_payloads=[
+                    {
+                        "currency": entry.currency,
+                        "amount_delta": float(entry.amount_delta),
+                        "rmb_amount": float(entry.rmb_amount) if entry.rmb_amount is not None else None,
+                        "fx_rate_to_cny": float(entry.fx_rate_to_cny) if entry.fx_rate_to_cny is not None else None,
+                        "unknown_basis": (
+                            event.event_type == EventType.MANUAL_ADJUSTMENT
+                            and entry.currency != "CNY"
+                            and Decimal(str(entry.amount_delta)) > 0
+                            and entry.rmb_amount is None
+                            and entry.fx_rate_to_cny is None
+                        ),
+                    }
+                    for entry in event.cash_ledger_entries
+                ],
+            )
+            replayed += 1
+
+        summary = {
+            "dry_run": False,
+            "events_replayed": replayed,
+            "impacted_asset_ids": impacted_asset_ids,
+            "cleared_records": existing_counts,
+            "created_records": self._derived_counts(user_id=user_id),
+        }
+        self.session.add(
+            AuditLog(
+                user_id=user_id,
+                entity_type="funding_attribution",
+                entity_id=str(user_id),
+                action="rebuild_completed",
+                status="completed",
+                details_json=summary,
+            )
+        )
+        self.session.flush()
+        return summary
+
+    def _clear_user_attribution(self, *, user_id: int) -> None:
+        event_ids = [
+            row[0]
+            for row in self.session.query(PortfolioEvent.id)
+            .filter(PortfolioEvent.user_id == user_id)
+            .all()
+        ]
+        lot_ids = [
+            row[0]
+            for row in self.session.query(FundingLot.id)
+            .filter(FundingLot.user_id == user_id)
+            .all()
+        ]
+        if event_ids:
+            self.session.query(Attribution).filter(Attribution.target_event_id.in_(event_ids)).delete(
+                synchronize_session=False
+            )
+            self.session.query(AttributionGap).filter(AttributionGap.event_id.in_(event_ids)).delete(
+                synchronize_session=False
+            )
+            self.session.query(LotConsumption).filter(LotConsumption.consuming_event_id.in_(event_ids)).delete(
+                synchronize_session=False
+            )
+        if lot_ids:
+            self.session.query(Attribution).filter(Attribution.source_lot_id.in_(lot_ids)).delete(
+                synchronize_session=False
+            )
+            self.session.query(LotConsumption).filter(LotConsumption.lot_id.in_(lot_ids)).delete(
+                synchronize_session=False
+            )
+            self.session.query(FundingLot).filter(FundingLot.id.in_(lot_ids)).delete(
+                synchronize_session=False
+            )
+        self.session.flush()
+
+    def _derived_counts(self, *, user_id: int) -> Dict[str, int]:
+        event_ids = [
+            row[0]
+            for row in self.session.query(PortfolioEvent.id)
+            .filter(PortfolioEvent.user_id == user_id)
+            .all()
+        ]
+        lot_ids = [
+            row[0]
+            for row in self.session.query(FundingLot.id)
+            .filter(FundingLot.user_id == user_id)
+            .all()
+        ]
+        return {
+            "funding_lots": len(lot_ids),
+            "lot_consumptions": self.session.query(LotConsumption).filter(LotConsumption.lot_id.in_(lot_ids)).count()
+            if lot_ids
+            else 0,
+            "attributions": self.session.query(Attribution).filter(Attribution.target_event_id.in_(event_ids)).count()
+            if event_ids
+            else 0,
+            "attribution_gaps": self.session.query(AttributionGap).filter(AttributionGap.user_id == user_id).count(),
+        }
 
 
 class PerformanceService:
@@ -736,6 +1765,74 @@ class AuditService:
             "overview": performance["overview"],
             "by_currency": by_currency,
             "data_quality": data_quality,
+            "attribution_diagnostics": self.get_attribution_diagnostics(user_id=user_id),
+        }
+
+    def get_attribution_diagnostics(self, *, user_id: int) -> Dict[str, Any]:
+        tracker = AttributionStatusTracker(self.session)
+        asset_ids = [
+            row[0]
+            for row in self.session.query(AssetLedgerEntry.asset_id)
+            .filter(AssetLedgerEntry.user_id == user_id)
+            .distinct()
+            .all()
+        ]
+        assets = self.session.query(Asset).filter(Asset.id.in_(asset_ids)).all() if asset_ids else []
+        status_counts: Dict[str, int] = defaultdict(int)
+        for asset in assets:
+            status_counts[tracker.compute_status(asset_id=asset.id, user_id=user_id).value] += 1
+
+        gaps = (
+            self.session.query(AttributionGap)
+            .filter(AttributionGap.user_id == user_id, AttributionGap.resolved_at.is_(None))
+            .order_by(AttributionGap.detected_at.asc(), AttributionGap.id.asc())
+            .all()
+        )
+        assets_by_id = {asset.id: asset for asset in self.session.query(Asset).filter(Asset.id.in_(asset_ids)).all()} if asset_ids else {}
+        gap_details = []
+        for gap in gaps:
+            asset = assets_by_id.get(gap.asset_id)
+            gap_details.append(
+                {
+                    "asset_id": gap.asset_id,
+                    "asset_code": asset.asset_code if asset else None,
+                    "event_id": gap.event_id,
+                    "gap_type": gap.gap_type.value,
+                    "currency": gap.currency,
+                    "shortfall_amount": self._to_float(gap.shortfall_amount, "0.000001") if gap.shortfall_amount is not None else None,
+                    "event_date": gap.event.event_time.isoformat() if gap.event is not None else None,
+                    "suggestions": tracker.suggest_corrections(gap=gap),
+                }
+            )
+
+        basis_missing_lots = []
+        lots = (
+            self.session.query(FundingLot)
+            .filter(FundingLot.user_id == user_id, FundingLot.status == LotStatus.BASIS_MISSING)
+            .order_by(FundingLot.created_at.asc(), FundingLot.id.asc())
+            .all()
+        )
+        for lot in lots:
+            basis_missing_lots.append(
+                {
+                    "lot_id": lot.id,
+                    "currency": lot.currency,
+                    "amount": self._to_float(lot.remaining_amount, "0.000001"),
+                    "source_event_id": lot.source_event_id,
+                    "source_date": lot.source_event.event_time.isoformat() if lot.source_event is not None else None,
+                    "suggestion": "Add RMB basis or mark the source as zero-basis if appropriate.",
+                }
+            )
+
+        return {
+            "total_products": len(assets),
+            "complete_attribution": status_counts.get(AttributionStatus.COMPLETE.value, 0),
+            "incomplete_attribution": status_counts.get(AttributionStatus.INCOMPLETE.value, 0),
+            "basis_missing": status_counts.get(AttributionStatus.BASIS_MISSING.value, 0),
+            "not_applicable": status_counts.get(AttributionStatus.NOT_APPLICABLE.value, 0),
+            "total_gaps": len(gaps),
+            "gap_details": gap_details,
+            "basis_missing_lots": basis_missing_lots,
         }
 
     def create_audit_log(
