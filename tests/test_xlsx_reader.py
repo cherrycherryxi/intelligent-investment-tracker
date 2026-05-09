@@ -3,9 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+import pytest
+
 from investment_tracker.utils.xlsx_reader import XlsxReader
 
+_FIXTURE = Path("investment_tracker_v5.xlsx")
 
+
+@pytest.mark.skipif(not _FIXTURE.exists(), reason="requires local fixture investment_tracker_v5.xlsx")
 def test_xlsx_reader_extracts_sheet_names_and_rows() -> None:
     workbook_bytes = Path("investment_tracker_v5.xlsx").read_bytes()
 
