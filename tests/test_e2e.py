@@ -4,15 +4,19 @@ import json
 from pathlib import Path
 
 from investment_tracker.mcp_tools import (
-    InvestmentAdvisorTool,
     MCPServer,
     NaturalLanguageTool,
     OCRTool,
+    PortfolioSummaryTool,
     PositionCalculatorTool,
     TransactionParserTool,
 )
 from investment_tracker.mcp_tools.ocr_tool import OCRExtraction, OCREngine
+from investment_tracker.skills.registry import SkillRegistry
+from investment_tracker.skills.runner import SkillRunner
 from investment_tracker.utils.ai_client import AIResponse
+
+SPECS_DIR = Path(__file__).parent.parent / "src" / "investment_tracker" / "skills" / "specs"
 
 
 class StubEngine(OCREngine):
@@ -32,11 +36,17 @@ class StubAIClient:
         return AIResponse(
             content=json.dumps(
                 {
-                    "summary": "Hold USD position.",
-                    "risk_level": "medium",
-                    "actions": [{"asset_code": "USD", "action": "HOLD", "rationale": "stable trend"}],
-                    "reasoning": "Portfolio has moderate concentration.",
-                    "warnings": ["Watch exchange rate volatility."],
+                    "advice": {
+                        "summary": "Hold USD position.",
+                        "risk_level": "medium",
+                        "actions": [{"asset_code": "USD", "action": "HOLD", "rationale": "stable trend"}],
+                        "reasoning": "Portfolio has moderate concentration.",
+                        "warnings": ["Watch exchange rate volatility."],
+                    },
+                    "portfolio_summary": {
+                        "positions_count": 1,
+                        "total_value_cny": 7300.0,
+                    },
                 }
             ),
             model="deepseek-reasoner",
@@ -75,8 +85,6 @@ def test_nlp_to_parse_flow() -> None:
 
 def test_position_to_advice_flow() -> None:
     calc = PositionCalculatorTool()
-    advice = InvestmentAdvisorTool(ai_client=StubAIClient())
-
     position_result = calc.execute(
         {
             "transactions": [
@@ -92,7 +100,14 @@ def test_position_to_advice_flow() -> None:
             "current_price": "7.30",
         }
     )
-    advice_result = advice.execute(
+
+    server = MCPServer()
+    server.register_tool(PortfolioSummaryTool())
+    registry = SkillRegistry.from_dir(SPECS_DIR)
+    runner = SkillRunner(skill_registry=registry, tool_server=server, ai_client=StubAIClient())
+
+    advice_result = runner.run(
+        "investment_advice_skill",
         {
             "positions": [
                 {
@@ -106,12 +121,12 @@ def test_position_to_advice_flow() -> None:
                 }
             ],
             "risk_preference": "balanced",
-        }
+        },
     )
 
     assert position_result["ok"] is True
-    assert advice_result["ok"] is True
-    assert advice_result["result"]["advice"]["actions"][0]["asset_code"] == "USD"
+    assert advice_result["advice"]["actions"][0]["asset_code"] == "USD"
+    assert "portfolio_summary" in advice_result
 
 
 def test_eval_fixture_has_ten_cases() -> None:
@@ -119,4 +134,3 @@ def test_eval_fixture_has_ten_cases() -> None:
     cases = json.loads(fixture_path.read_text(encoding="utf-8"))
 
     assert len(cases) >= 10
-

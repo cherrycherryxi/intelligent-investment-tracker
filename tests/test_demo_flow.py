@@ -10,4 +10,5 @@ def test_demo_flow_runs_end_to_end() -> None:
     assert result.imported_screenshot_transactions
     assert result.imported_natural_language_transactions
     assert result.positions
-    assert result.advice["ok"] is True
+    assert "advice" in result.advice
+    assert "portfolio_summary" in result.advice

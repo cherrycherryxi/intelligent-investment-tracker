@@ -7,11 +7,11 @@ from typing import Any
 
 __all__ = [
     "ExchangeRateTool",
-    "InvestmentAdvisorTool",
     "MCPServer",
     "MCPTool",
     "NaturalLanguageTool",
     "OCRTool",
+    "PortfolioSummaryTool",
     "PositionCalculatorTool",
     "ToolExecutionError",
     "TransactionParserTool",
@@ -26,7 +26,7 @@ _EXPORTS = {
     "ExchangeRateTool": ("investment_tracker.mcp_tools.exchange_rate_tool", "ExchangeRateTool"),
     "PositionCalculatorTool": ("investment_tracker.mcp_tools.position_calculator_tool", "PositionCalculatorTool"),
     "NaturalLanguageTool": ("investment_tracker.mcp_tools.nlp_tool", "NaturalLanguageTool"),
-    "InvestmentAdvisorTool": ("investment_tracker.mcp_tools.investment_advisor_tool", "InvestmentAdvisorTool"),
+    "PortfolioSummaryTool": ("investment_tracker.mcp_tools.portfolio_summary_tool", "PortfolioSummaryTool"),
 }
 
 

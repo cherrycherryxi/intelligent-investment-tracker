@@ -10,15 +10,22 @@ from typing import Any, Dict, List
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from pathlib import Path as _Path
+
 from investment_tracker.data.base import Base
 from investment_tracker.data.enums import RecordStatus
 from investment_tracker.data.repositories import TransactionRepository
 from investment_tracker.data.services import PortfolioService
 from investment_tracker.mcp_tools.exchange_rate_tool import ExchangeRateTool
-from investment_tracker.mcp_tools.investment_advisor_tool import InvestmentAdvisorTool
 from investment_tracker.mcp_tools.nlp_tool import NaturalLanguageTool
+from investment_tracker.mcp_tools.portfolio_summary_tool import PortfolioSummaryTool
+from investment_tracker.mcp_tools.server import MCPServer
 from investment_tracker.orchestration.screenshot_import_service import ScreenshotImportService
+from investment_tracker.skills.registry import SkillRegistry
+from investment_tracker.skills.runner import SkillRunner
 from investment_tracker.utils.ai_client import AIResponse
+
+_SPECS_DIR = _Path(__file__).resolve().parent.parent / "src" / "investment_tracker" / "skills" / "specs"
 
 ROOT = Path(__file__).resolve().parent
 FIXTURES = ROOT / "fixtures"
@@ -42,14 +49,21 @@ class DemoAIClient:
         return AIResponse(
             content=json.dumps(
                 {
-                    "summary": "Portfolio remains moderately diversified with manageable FX concentration.",
-                    "risk_level": "medium",
-                    "actions": [
-                        {"asset_code": "USD", "action": "HOLD", "rationale": "USD position is small and stable."},
-                        {"asset_code": "JPY", "action": "HOLD", "rationale": "JPY allocation came from recent FX rotation."},
-                    ],
-                    "reasoning": "Balanced risk preference favors holding existing small positions rather than adding leverage.",
-                    "warnings": ["Bond round-trip is complete, so no current bond exposure remains."],
+                    "advice": {
+                        "summary": "Portfolio remains moderately diversified with manageable FX concentration.",
+                        "risk_level": "medium",
+                        "actions": [
+                            {"asset_code": "USD", "action": "HOLD", "rationale": "USD position is small and stable."},
+                            {"asset_code": "JPY", "action": "HOLD", "rationale": "JPY allocation came from recent FX rotation."},
+                        ],
+                        "reasoning": "Balanced risk preference favors holding existing small positions rather than adding leverage.",
+                        "warnings": ["Bond round-trip is complete, so no current bond exposure remains."],
+                    },
+                    "portfolio_summary": {
+                        "positions_count": 0,
+                        "total_value_cny": 0.0,
+                        "currency_exposure": {},
+                    },
                 },
                 ensure_ascii=False,
             ),
@@ -208,13 +222,17 @@ def run_demo() -> DemoResult:
 
         portfolio_service = PortfolioService(session, exchange_rate_tool=exchange_rate_tool)
         positions = portfolio_service.build_positions(user_id=1)
-        advice_tool = InvestmentAdvisorTool(ai_client=DemoAIClient())
-        advice = advice_tool.execute(
+        server = MCPServer()
+        server.register_tool(PortfolioSummaryTool())
+        registry = SkillRegistry.from_dir(_SPECS_DIR)
+        runner = SkillRunner(skill_registry=registry, tool_server=server, ai_client=DemoAIClient())
+        advice = runner.run(
+            "investment_advice_skill",
             {
                 "positions": positions,
                 "market_data": {"mode": "demo", "generated_from": "local fixtures"},
                 "risk_preference": fixture_inputs["risk_preference"],
-            }
+            },
         )
     finally:
         session.close()
