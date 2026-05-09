@@ -61,25 +61,17 @@ def _patch_sessions(monkeypatch: pytest.MonkeyPatch):
     return SessionLocal
 
 
-class StubAdvisorTool:
-    def execute(self, payload):
-        asset_code = payload["positions"][0]["asset_code"] if payload["positions"] else "UNKNOWN"
-        return {
-            "ok": True,
-            "result": {
-                "portfolio_summary": {"positions_count": len(payload["positions"])},
-                "advice": {
-                    "summary": "stub advice",
-                    "risk_level": "medium",
-                    "actions": [{"asset_code": asset_code, "action": "HOLD"}],
-                    "reasoning": "stub reasoning",
-                    "warnings": [],
-                },
-                "ai_provider": "stub",
-                "model": "stub-model",
-                "token_usage": {"input_tokens": 1, "output_tokens": 1},
-            },
-        }
+class _StubState:
+    class orchestration:
+        class skill_runner:
+            @staticmethod
+            def run(skill_name, payload):
+                return {"stub": True}
+
+
+class _FakeRequest:
+    class app:
+        state = _StubState()
 
 
 def test_create_and_list_transactions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,7 +185,6 @@ def test_transaction_history_includes_v2_events_and_filters_asset_text(monkeypat
 
 def test_positions_and_advice(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_sessions(monkeypatch)
-    monkeypatch.setattr(advice_routes, "InvestmentAdvisorTool", StubAdvisorTool)
     payload = TransactionCreateRequest(
         user_id=1,
         asset_type="FOREX",
@@ -209,7 +200,7 @@ def test_positions_and_advice(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(create_transaction(payload))
 
     positions = asyncio.run(list_positions(user_id=1))
-    advice = asyncio.run(get_advice(user_id=1, risk_preference="balanced"))
+    advice = asyncio.run(get_advice(request=_FakeRequest(), user_id=1, risk_preference="balanced"))
 
     assert positions["positions"]
     assert advice["ok"] is True

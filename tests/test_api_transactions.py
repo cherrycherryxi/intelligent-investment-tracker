@@ -13,6 +13,8 @@ from investment_tracker.data.base import Base
 import investment_tracker.api.routes.transactions as transaction_routes
 from investment_tracker.api.routes.transactions import import_excel_preview
 
+_FIXTURE = Path("investment_tracker_v5.xlsx")
+
 
 def _build_request(body: bytes) -> Request:
     async def receive():
@@ -28,6 +30,7 @@ def _build_request(body: bytes) -> Request:
     return Request(scope, receive)
 
 
+@pytest.mark.skipif(not _FIXTURE.exists(), reason="requires local fixture investment_tracker_v5.xlsx")
 def test_import_excel_preview_endpoint() -> None:
     workbook_bytes = Path("investment_tracker_v5.xlsx").read_bytes()
     payload = asyncio.run(
@@ -47,6 +50,7 @@ def test_import_excel_preview_rejects_empty_body() -> None:
     assert exc_info.value.status_code == 400
 
 
+@pytest.mark.skipif(not _FIXTURE.exists(), reason="requires local fixture investment_tracker_v5.xlsx")
 def test_import_excel_confirm_persists_ready_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     workbook_bytes = Path("investment_tracker_v5.xlsx").read_bytes()
     engine = create_engine("sqlite:///:memory:", future=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -10,6 +11,8 @@ from investment_tracker.data.enums import AssetType, EventType
 from investment_tracker.data.repositories import TransactionRepository
 from investment_tracker.orchestration.excel_import_service import ExcelImportPreviewService
 from investment_tracker.utils.xlsx_reader import WorkbookSheet
+
+_FIXTURE = Path("investment_tracker_v5.xlsx")
 
 
 def _session():
@@ -32,6 +35,7 @@ class StubWorkbookReader:
         ]
 
 
+@pytest.mark.skipif(not _FIXTURE.exists(), reason="requires local fixture investment_tracker_v5.xlsx")
 def test_excel_import_preview_builds_ready_pending_and_failed_groups() -> None:
     workbook_bytes = Path("investment_tracker_v5.xlsx").read_bytes()
 
