@@ -23,3 +23,4 @@ src/*.egg-info/
 *.csv
 *.docx
 *.xlsx
+.claude/worktrees/
