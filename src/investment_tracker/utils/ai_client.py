@@ -23,6 +23,17 @@ class AIResponse:
     raw_response: Dict[str, Any]
 
 
+@dataclass
+class AIToolResponse:
+    """Response from generate_with_tools. content_blocks and tool_use_blocks use
+    the Anthropic canonical format regardless of provider."""
+    stop_reason: str  # "tool_use" | "end_turn" | "stop"
+    content_blocks: list  # [{"type":"text","text":"..."} | {"type":"tool_use","id":"...","name":"...","input":{}}]
+    tool_use_blocks: list  # only tool_use blocks, same shape
+    input_tokens: int
+    output_tokens: int
+
+
 class Transport(Protocol):
     def post_json(self, *, url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         ...
@@ -126,6 +137,142 @@ class AIClient:
                 time.sleep(self.retry_delay_seconds)
 
         raise last_error or ToolExecutionError("unknown AI client error", code="ai_unknown_error")
+
+    def generate_with_tools(
+        self,
+        messages: list,
+        *,
+        tools: list,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> AIToolResponse:
+        """Single tool_use API call. Messages use the Anthropic canonical format.
+        tools is a list of {name, description, input_schema} dicts."""
+        resolved_provider = self.settings.ai_provider
+        resolved_model = model or self.settings.ai_model_name
+        resolved_temperature = self.settings.ai_temperature if temperature is None else temperature
+        resolved_max_tokens = self.settings.ai_max_tokens if max_tokens is None else max_tokens
+        request_timeout = self.settings.ai_request_timeout_seconds
+        api_key = self.settings.ai_api_key or "test-key"
+
+        if resolved_provider == "claude":
+            url = "https://api.anthropic.com/v1/messages"
+            headers = {
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            }
+            payload: Dict[str, Any] = {
+                "model": resolved_model,
+                "messages": messages,
+                "tools": tools,
+                "temperature": resolved_temperature,
+                "max_tokens": resolved_max_tokens,
+            }
+            if system_prompt:
+                payload["system"] = system_prompt
+            raw = self.transport.post_json(url=url, headers=headers, payload=payload, timeout=request_timeout)
+            content_blocks = raw.get("content", [])
+            tool_use = [b for b in content_blocks if b.get("type") == "tool_use"]
+            usage = raw.get("usage", {})
+            return AIToolResponse(
+                stop_reason=raw.get("stop_reason", "end_turn"),
+                content_blocks=content_blocks,
+                tool_use_blocks=tool_use,
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+            )
+
+        if resolved_provider == "deepseek":
+            url = "https://api.deepseek.com/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            }
+            oai_tools = [
+                {"type": "function", "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object"}),
+                }}
+                for t in tools
+            ]
+            oai_messages = self._canonical_to_openai(messages, system_prompt)
+            payload = {
+                "model": resolved_model,
+                "messages": oai_messages,
+                "tools": oai_tools,
+                "temperature": resolved_temperature,
+                "max_tokens": resolved_max_tokens,
+            }
+            raw = self.transport.post_json(url=url, headers=headers, payload=payload, timeout=request_timeout)
+            choice = raw.get("choices", [{}])[0]
+            msg = choice.get("message", {})
+            finish_reason = choice.get("finish_reason", "stop")
+            usage = raw.get("usage", {})
+
+            content_blocks = []
+            tool_use_blocks = []
+            if msg.get("content"):
+                content_blocks.append({"type": "text", "text": msg["content"]})
+            for tc in msg.get("tool_calls") or []:
+                args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else tc["function"]["arguments"]
+                block = {"type": "tool_use", "id": tc["id"], "name": tc["function"]["name"], "input": args}
+                content_blocks.append(block)
+                tool_use_blocks.append(block)
+
+            stop_reason = "tool_use" if finish_reason == "tool_calls" else "end_turn"
+            return AIToolResponse(
+                stop_reason=stop_reason,
+                content_blocks=content_blocks,
+                tool_use_blocks=tool_use_blocks,
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+            )
+
+        raise ToolExecutionError(
+            f"unsupported AI provider: {resolved_provider}",
+            code="unsupported_ai_provider",
+        )
+
+    @staticmethod
+    def _canonical_to_openai(messages: list, system_prompt: Optional[str]) -> list:
+        """Translate Anthropic canonical messages to OpenAI format."""
+        result = []
+        if system_prompt:
+            result.append({"role": "system", "content": system_prompt})
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if isinstance(content, str):
+                result.append({"role": role, "content": content})
+                continue
+            if role == "assistant":
+                text_parts = [b["text"] for b in content if b.get("type") == "text"]
+                tool_calls = [
+                    {"id": b["id"], "type": "function",
+                     "function": {"name": b["name"], "arguments": json.dumps(b["input"])}}
+                    for b in content if b.get("type") == "tool_use"
+                ]
+                entry: Dict[str, Any] = {"role": "assistant", "content": " ".join(text_parts) or None}
+                if tool_calls:
+                    entry["tool_calls"] = tool_calls
+                result.append(entry)
+            elif role == "user" and isinstance(content, list):
+                for block in content:
+                    if block.get("type") == "tool_result":
+                        result.append({
+                            "role": "tool",
+                            "tool_call_id": block["tool_use_id"],
+                            "content": block.get("content", ""),
+                        })
+                    else:
+                        result.append({"role": "user", "content": block.get("text", "")})
+            else:
+                result.append({"role": role, "content": str(content)})
+        return result
 
     def estimate_tokens(self, text: str) -> int:
         stripped = text.strip()
