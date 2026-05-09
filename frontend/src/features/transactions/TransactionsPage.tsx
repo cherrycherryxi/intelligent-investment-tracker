@@ -92,6 +92,10 @@ function signedTradeAmount(row: Transaction): number | null | undefined {
   return null;
 }
 
+function productLabel(row: Transaction): string {
+  return row.asset_name || row.asset_code;
+}
+
 function formatTradeValue(row: Transaction): string {
   const costCny = signedTotalCost(row);
   if (costCny !== null && costCny !== undefined) {
@@ -491,7 +495,7 @@ export default function TransactionsPage() {
     rows.sort((left, right) => {
       const factor = sortOrder === 'asc' ? 1 : -1;
       if (sortBy === 'asset_code') {
-        return left.asset_code.localeCompare(right.asset_code) * factor;
+        return productLabel(left).localeCompare(productLabel(right), 'zh-CN') * factor;
       }
       if (sortBy === 'total_cost_cny') {
         return ((signedTotalCost(left) ?? signedTradeAmount(left) ?? 0) - (signedTotalCost(right) ?? signedTradeAmount(right) ?? 0)) * factor;
@@ -508,7 +512,21 @@ export default function TransactionsPage() {
 
   const columns = [
     { key: 'asset_type', header: 'Asset', render: (row: Transaction) => row.asset_type },
-    { key: 'asset_code', header: 'Code', sortable: true, render: (row: Transaction) => row.asset_code },
+    {
+      key: 'asset_code',
+      header: 'Product',
+      sortable: true,
+      render: (row: Transaction) => (
+        <Stack spacing={0.25}>
+          <Typography>{productLabel(row)}</Typography>
+          {row.asset_name ? (
+            <Typography variant="caption" color="text.secondary">
+              {row.asset_code}
+            </Typography>
+          ) : null}
+        </Stack>
+      ),
+    },
     {
       key: 'direction',
       header: 'Direction',
@@ -545,7 +563,7 @@ export default function TransactionsPage() {
                 <Grid item xs={12} sm={4}>
                   <TextField
                     fullWidth
-                    label="Asset Code"
+                    label="Product Name or Code"
                     value={assetCode}
                     onChange={(event) => {
                       setAssetCode(event.target.value);
@@ -642,7 +660,9 @@ export default function TransactionsPage() {
         <DialogContent>
           {selectedTransaction ? (
             <Stack spacing={1.2} sx={{ pt: 1 }}>
-              <Typography><strong>Asset:</strong> {selectedTransaction.asset_type} / {selectedTransaction.asset_code}</Typography>
+              <Typography><strong>Asset:</strong> {selectedTransaction.asset_type}</Typography>
+              <Typography><strong>Product:</strong> {productLabel(selectedTransaction)}</Typography>
+              <Typography><strong>Code:</strong> {selectedTransaction.asset_code}</Typography>
               <Typography><strong>Direction:</strong> {selectedTransaction.direction}</Typography>
               <Typography><strong>Quantity:</strong> {formatNumber(selectedTransaction.quantity, 6)}</Typography>
               <Typography><strong>Unit Price:</strong> {formatNumber(selectedTransaction.unit_price, 6)} {selectedTransaction.trade_currency}</Typography>

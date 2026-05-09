@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "created_at": "2026-05-05T12:19:03.079Z",
+  "lifetime": {
+    "total_tokens_estimated": 38935,
+    "total_reads": 7,
+    "total_writes": 0,
+    "total_sessions": 5,
+    "anatomy_hits": 7,
+    "anatomy_misses": 0,
+    "repeated_reads_blocked": 0,
+    "estimated_savings_vs_bare_cli": 1400
+  },
+  "sessions": [
+    {
+      "id": "session-2026-05-09-1416",
+      "started": "2026-05-09T06:16:44.170Z",
+      "ended": "2026-05-09T06:19:54.450Z",
+      "reads": [
+        {
+          "file": "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/__init__.py",
+          "tokens_estimated": 53,
+          "was_repeated": false,
+          "anatomy_had_description": false
+        },
+        {
+          "file": "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/settings.py",
+          "tokens_estimated": 1414,
+          "was_repeated": false,
+          "anatomy_had_description": false
+        },
+        {
+          "file": "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/api/main.py",
+          "tokens_estimated": 507,
+          "was_repeated": false,
+          "anatomy_had_description": false
+        },
+        {
+          "file": "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/data/__init__.py",
+          "tokens_estimated": 8,
+          "was_repeated": false,
+          "anatomy_had_description": false
+        },
+        {
+          "file": "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/data/models.py",
+          "tokens_estimated": 4698,
+          "was_repeated": false,
+          "anatomy_had_description": false
+        },
+        {
+          "file": "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/data/services.py",
+          "tokens_estimated": 31965,
+          "was_repeated": false,
+          "anatomy_had_description": false
+        },
+        {
+          "file": "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/mcp_tools/server.py",
+          "tokens_estimated": 290,
+          "was_repeated": false,
+          "anatomy_had_description": false
+        }
+      ],
+      "writes": [],
+      "totals": {
+        "input_tokens_estimated": 38935,
+        "output_tokens_estimated": 0,
+        "reads_count": 7,
+        "writes_count": 0,
+        "repeated_reads_blocked": 0,
+        "anatomy_lookups": 7
+      }
+    }
+  ],
+  "daemon_usage": [],
+  "waste_flags": [],
+  "optimization_report": {
+    "last_generated": null,
+    "patterns": []
+  }
+}

@@ -22,6 +22,8 @@ export interface ColumnDef<T> {
 interface DataTableProps<T> {
   columns: ColumnDef<T>[];
   rows: T[];
+  stickyHeader?: boolean;
+  maxHeight?: number | string;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
   onSort?: (key: string) => void;
@@ -35,6 +37,8 @@ interface DataTableProps<T> {
 export function DataTable<T>({
   columns,
   rows,
+  stickyHeader = false,
+  maxHeight,
   sortBy,
   sortOrder,
   onSort,
@@ -46,12 +50,16 @@ export function DataTable<T>({
 }: DataTableProps<T>) {
   return (
     <Paper variant="outlined" sx={{ overflow: 'hidden', borderRadius: 3 }}>
-      <TableContainer>
-        <Table size="small">
+      <TableContainer sx={{ maxHeight, overflow: maxHeight ? 'auto' : undefined }}>
+        <Table size="small" stickyHeader={stickyHeader}>
           <TableHead>
             <TableRow>
               {columns.map((column) => (
-                <TableCell key={column.key} align={column.align}>
+                <TableCell
+                  key={column.key}
+                  align={column.align}
+                  sx={stickyHeader ? { bgcolor: 'background.paper', fontWeight: 700 } : undefined}
+                >
                   {column.sortable && onSort ? (
                     <TableSortLabel
                       active={sortBy === column.key}

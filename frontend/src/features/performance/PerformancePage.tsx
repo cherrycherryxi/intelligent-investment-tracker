@@ -9,7 +9,7 @@ import { DataTable } from '../../components/common/DataTable';
 import { LoadingSpinner } from '../../components/common/LoadingSpinner';
 import { SectionCard } from '../../components/common/SectionCard';
 import { getPerformance } from '../../services/performance';
-import type { AssetTypePerformance, CurrencyPerformance } from '../../types/performance';
+import type { AssetTypePerformance, CurrencyPerformance, RealizedClosedPosition } from '../../types/performance';
 import { DEFAULT_USER_ID } from '../../utils/constants';
 import { formatCurrency, formatNumber, formatPercentage } from '../../utils/formatting';
 
@@ -44,6 +44,27 @@ export default function PerformancePage() {
     { key: 'weight_pct', header: 'Weight', align: 'right' as const, render: (row: AssetTypePerformance) => formatPercentage(row.weight_pct) },
   ];
 
+  const realizedColumns = [
+    { key: 'asset_name', header: '产品', render: (row: RealizedClosedPosition) => row.asset_name || row.asset_code },
+    { key: 'asset_code', header: '代码', render: (row: RealizedClosedPosition) => row.asset_code },
+    { key: 'currency', header: '币种', render: (row: RealizedClosedPosition) => row.currency },
+    { key: 'buy_native', header: '累计买入', align: 'right' as const, render: (row: RealizedClosedPosition) => formatNumber(row.buy_native, 6) },
+    { key: 'sell_native', header: '累计赎回', align: 'right' as const, render: (row: RealizedClosedPosition) => formatNumber(row.sell_native, 6) },
+    {
+      key: 'realized_investment_pnl_native',
+      header: '已实现收益(原币)',
+      align: 'right' as const,
+      render: (row: RealizedClosedPosition) => formatNumber(row.realized_investment_pnl_native, 6),
+    },
+    {
+      key: 'realized_investment_pnl_cny',
+      header: '已实现收益(人民币)',
+      align: 'right' as const,
+      render: (row: RealizedClosedPosition) => formatCurrency(row.realized_investment_pnl_cny),
+    },
+    { key: 'fx_rate_to_cny', header: '折算汇率', align: 'right' as const, render: (row: RealizedClosedPosition) => formatNumber(row.fx_rate_to_cny, 6) },
+  ];
+
   return (
     <Stack spacing={3}>
       <Box>
@@ -75,6 +96,8 @@ export default function PerformancePage() {
                 { label: 'Total PnL', value: formatCurrency(overview?.total_pnl_cny), tone: (overview?.total_pnl_cny ?? 0) >= 0 ? 'success' : 'error' },
                 { label: 'Total Return', value: formatPercentage(overview?.total_return_pct), tone: (overview?.total_return_pct ?? 0) >= 0 ? 'success' : 'error' },
                 { label: 'Investment PnL', value: formatCurrency(overview?.investment_pnl_cny), tone: (overview?.investment_pnl_cny ?? 0) >= 0 ? 'success' : 'error' },
+                { label: 'Realized Investment PnL', value: formatCurrency(overview?.realized_investment_pnl_cny), tone: (overview?.realized_investment_pnl_cny ?? 0) >= 0 ? 'success' : 'error' },
+                { label: 'Unrealized Investment PnL', value: formatCurrency(overview?.unrealized_investment_pnl_cny), tone: (overview?.unrealized_investment_pnl_cny ?? 0) >= 0 ? 'success' : 'error' },
                 { label: 'FX PnL', value: formatCurrency(overview?.fx_pnl_cny), tone: (overview?.fx_pnl_cny ?? 0) >= 0 ? 'success' : 'error' },
               ].map((item) => (
                 <Grid key={item.label} item xs={12} sm={6} lg={4}>
@@ -93,11 +116,18 @@ export default function PerformancePage() {
                 <Chip icon={<WarningAmberIcon />} color="warning" label={`Missing rates: ${dataQuality?.missing_rates.join(', ') || 0}`} />
                 <Chip icon={<WarningAmberIcon />} color="warning" label={`Missing valuations: ${dataQuality?.missing_valuations.length ?? 0}`} />
                 <Chip color="info" label={`Estimated values: ${dataQuality?.estimated_values.length ?? 0}`} />
+                <Chip color="info" label={`Closed realized positions: ${dataQuality?.realized_closed_positions?.length ?? 0}`} />
               </Stack>
             ) : null}
 
             <DataTable columns={currencyColumns} rows={query.data?.by_currency ?? []} />
             <DataTable columns={assetTypeColumns} rows={query.data?.by_asset_type ?? []} />
+            <Box>
+              <Typography variant="h6" sx={{ mb: 1 }}>
+                已清仓产品已实现投资收益
+              </Typography>
+              <DataTable columns={realizedColumns} rows={query.data?.data_quality.realized_closed_positions ?? []} />
+            </Box>
           </Stack>
         )}
       </SectionCard>

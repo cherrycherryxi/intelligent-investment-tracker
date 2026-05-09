@@ -93,7 +93,8 @@ function ExcelImportPanel() {
     mutationFn: ({ workbook, pending }: { workbook: File; pending: boolean }) => confirmExcel(workbook, pending),
     onSuccess: (data) => {
       const duplicateText = data.skipped_duplicate_count ? `，跳过 ${data.skipped_duplicate_count} 条重复记录` : '';
-      notifications.success(`导入完成，写入 ${data.imported_count} 条交易、${data.imported_event_count ?? 0} 个事件${duplicateText}`);
+      const patchedText = data.patched_event_count ? `，补充 ${data.patched_event_count} 条事件` : '';
+      notifications.success(`导入完成，写入 ${data.imported_count} 条交易、${data.imported_event_count ?? 0} 个事件${patchedText}${duplicateText}`);
       void queryClient.invalidateQueries({ queryKey: ['transactions'] });
       void queryClient.invalidateQueries({ queryKey: ['positions'] });
       void queryClient.invalidateQueries({ queryKey: ['performance'] });

@@ -23,6 +23,7 @@ const navItems = [
   { to: '/positions', label: 'Positions' },
   { to: '/imports', label: 'Import' },
   { to: '/advice', label: 'Advice' },
+  { to: '/agent-tools', label: 'Agent Tools' },
   { to: '/exchange-rates', label: 'Exchange Rates' },
 ];
 

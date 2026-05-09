@@ -186,6 +186,7 @@ export interface ExcelConfirmResponse {
   source_name: string;
   imported_count: number;
   imported_event_count?: number;
+  patched_event_count?: number;
   skipped_pending_count: number;
   skipped_duplicate_count?: number;
   failed_count: number;

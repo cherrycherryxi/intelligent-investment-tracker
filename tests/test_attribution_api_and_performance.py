@@ -171,6 +171,24 @@ def test_positions_response_exposes_attribution_fields_and_detail_endpoint(monke
     assert detail["attributions"][0]["funding_sources"][0]["source_type"] == "FX_BUY"
 
 
+def test_positions_totals_sum_attribution_aware_rows(monkeypatch) -> None:
+    SessionLocal = _session_local()
+    monkeypatch.setattr(positions_routes, "get_db_session", SessionContext(SessionLocal))
+    with SessionLocal() as session:
+        _seed_attributed_fund(session)
+
+    response = asyncio.run(list_positions(user_id=1, asset_type=positions_routes.AssetType.FUND))
+    fund = response["positions"][0]
+
+    assert fund["legacy_cost_basis_cny"] == 710.0
+    assert fund["attributed_cost_basis_cny"] == 720.0
+    assert fund["unrealized_pnl_cny"] == 156.0
+    assert response["totals"]["total_cost_cny"] == 720.0
+    assert response["totals"]["total_pnl_cny"] == 156.0
+    assert response["totals"]["total_investment_pnl_cny"] == 146.0
+    assert response["totals"]["total_fx_pnl_cny"] == 10.0
+
+
 def test_audit_includes_attribution_diagnostics() -> None:
     SessionLocal = _session_local()
     with SessionLocal() as session:

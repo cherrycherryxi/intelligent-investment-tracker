@@ -12,7 +12,16 @@ from sqlalchemy.orm import selectinload
 from investment_tracker.api.schemas import ScreenshotUploadRequest, TransactionCreateRequest, TransactionHistoryUpdateRequest
 from investment_tracker.data.db import get_db_session
 from investment_tracker.data.enums import AssetType, EventType, TransactionDirection
-from investment_tracker.data.models import AssetLedgerEntry, CashLedgerEntry, PortfolioEvent, Transaction
+from investment_tracker.data.models import (
+    AssetLedgerEntry,
+    Attribution,
+    AttributionGap,
+    CashLedgerEntry,
+    FundingLot,
+    LotConsumption,
+    PortfolioEvent,
+    Transaction,
+)
 from investment_tracker.data.repositories import TransactionRepository
 from investment_tracker.mcp_tools.exchange_rate_tool import ExchangeRateTool
 from investment_tracker.orchestration.excel_import_service import ExcelImportPreviewService
@@ -394,6 +403,20 @@ async def delete_transaction_history_record(record_type: str, record_id: int) ->
             row = session.get(PortfolioEvent, record_id)
             if row is None:
                 raise HTTPException(status_code=404, detail="event not found")
+            source_lot_ids = [
+                lot_id
+                for (lot_id,) in session.query(FundingLot.id)
+                .filter(FundingLot.source_event_id == record_id)
+                .all()
+            ]
+            if source_lot_ids:
+                session.query(Attribution).filter(Attribution.source_lot_id.in_(source_lot_ids)).delete(synchronize_session=False)
+                session.query(LotConsumption).filter(LotConsumption.lot_id.in_(source_lot_ids)).delete(synchronize_session=False)
+            session.query(Attribution).filter(Attribution.target_event_id == record_id).delete(synchronize_session=False)
+            session.query(AttributionGap).filter(AttributionGap.event_id == record_id).delete(synchronize_session=False)
+            session.query(LotConsumption).filter(LotConsumption.consuming_event_id == record_id).delete(synchronize_session=False)
+            if source_lot_ids:
+                session.query(FundingLot).filter(FundingLot.id.in_(source_lot_ids)).delete(synchronize_session=False)
             session.query(CashLedgerEntry).filter(CashLedgerEntry.event_id == record_id).delete()
             session.query(AssetLedgerEntry).filter(AssetLedgerEntry.event_id == record_id).delete()
             session.delete(row)

@@ -15,7 +15,9 @@ from investment_tracker.api.routes.positions import router as positions_router
 from investment_tracker.api.routes.transactions import router as transactions_router
 from investment_tracker.mcp_tools.base import ToolExecutionError
 from investment_tracker.orchestration.container import OrchestrationContainer
+from investment_tracker.settings import get_settings
 from investment_tracker.utils.ai_client import AIClient
+from investment_tracker.utils.logger import configure_logging
 
 
 @asynccontextmanager
@@ -25,6 +27,8 @@ async def _lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    configure_logging(get_settings())
+
     app = FastAPI(
         title="Intelligent Investment Tracker",
         version="0.2.0",

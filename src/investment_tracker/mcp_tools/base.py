@@ -8,6 +8,8 @@ from typing import Any, Dict, Iterable, Optional, Type
 
 from pydantic import BaseModel, ValidationError
 
+from investment_tracker.utils.agent_run_logger import log_agent_event
+
 
 class ToolExecutionError(Exception):
     """Structured exception for tool execution failures."""
@@ -82,9 +84,15 @@ class MCPTool(ABC):
         )
 
     def execute(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        log_agent_event(
+            "Tool selected",
+            data={"tool": self.name, "description": self.description, "version": self.version, "payload": payload},
+        )
         try:
             validated_payload = self._validate_payload(payload)
+            log_agent_event("Tool input validated", data={"tool": self.name, "validated_payload": validated_payload})
             result = self._run(validated_payload)
+            log_agent_event("Tool completed", data={"tool": self.name, "result": result})
             return {
                 "tool": self.name,
                 "ok": True,
@@ -92,6 +100,10 @@ class MCPTool(ABC):
                 "error": None,
             }
         except ToolExecutionError as exc:
+            log_agent_event(
+                "Tool failed",
+                data={"tool": self.name, "code": exc.code, "message": str(exc), "details": exc.details},
+            )
             return {
                 "tool": self.name,
                 "ok": False,
@@ -104,6 +116,7 @@ class MCPTool(ABC):
                 code="validation_error",
                 details={"errors": exc.errors()},
             )
+            log_agent_event("Tool validation failed", data={"tool": self.name, "error": error.to_dict()})
             return {
                 "tool": self.name,
                 "ok": False,
@@ -121,4 +134,3 @@ class MCPTool(ABC):
     @abstractmethod
     def _run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the tool implementation."""
-

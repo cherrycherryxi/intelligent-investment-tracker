@@ -1,0 +1,48 @@
+{
+  "session_id": "session-2026-05-09-1416",
+  "started": "2026-05-09T06:16:44.170Z",
+  "files_read": {
+    "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/__init__.py": {
+      "count": 1,
+      "tokens": 53,
+      "first_read": "2026-05-09T06:18:23.551Z"
+    },
+    "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/settings.py": {
+      "count": 1,
+      "tokens": 1414,
+      "first_read": "2026-05-09T06:18:23.843Z"
+    },
+    "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/api/main.py": {
+      "count": 1,
+      "tokens": 507,
+      "first_read": "2026-05-09T06:18:23.944Z"
+    },
+    "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/data/__init__.py": {
+      "count": 1,
+      "tokens": 8,
+      "first_read": "2026-05-09T06:18:24.236Z"
+    },
+    "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/data/models.py": {
+      "count": 1,
+      "tokens": 4698,
+      "first_read": "2026-05-09T06:18:26.576Z"
+    },
+    "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/data/services.py": {
+      "count": 1,
+      "tokens": 31965,
+      "first_read": "2026-05-09T06:18:27.008Z"
+    },
+    "/Users/huangnanqi/CursorProjects/investment-assistant/src/investment_tracker/mcp_tools/server.py": {
+      "count": 1,
+      "tokens": 290,
+      "first_read": "2026-05-09T06:18:27.266Z"
+    }
+  },
+  "files_written": [],
+  "edit_counts": {},
+  "anatomy_hits": 7,
+  "anatomy_misses": 0,
+  "repeated_reads_warned": 0,
+  "cerebrum_warnings": 0,
+  "stop_count": 1
+}

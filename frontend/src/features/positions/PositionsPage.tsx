@@ -81,6 +81,12 @@ function formatCostDiff(row: Position): string {
   return formatCurrency(row.attributed_cost_basis_cny - row.legacy_cost_basis_cny);
 }
 
+function formatHoldingAmount(row: Position): string {
+  const amount = row.current_value_native ?? row.quantity;
+  const formatted = formatNumber(amount, 6);
+  return row.currency ? `${formatted} ${row.currency}` : formatted;
+}
+
 function isAmountValuedPosition(row: Position): boolean {
   return row.asset_type === 'BOND' || row.asset_type === 'FUND' || row.asset_type === 'WEALTH_PRODUCT';
 }
@@ -90,6 +96,7 @@ export default function PositionsPage() {
   const [sortBy, setSortBy] = useState('asset_code');
   const [snapshotTarget, setSnapshotTarget] = useState<Position | null>(null);
   const [snapshotValue, setSnapshotValue] = useState('');
+  const [snapshotQuantity, setSnapshotQuantity] = useState('');
   const [snapshotTime, setSnapshotTime] = useState(toDatetimeLocalValue(new Date().toISOString()));
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const queryClient = useQueryClient();
@@ -108,14 +115,20 @@ export default function PositionsPage() {
   const openSnapshotDialog = (row: Position) => {
     setSnapshotTarget(row);
     setSnapshotValue(row.current_value_native?.toString() ?? row.quantity.toString());
+    setSnapshotQuantity((row.ledger_quantity ?? row.quantity).toString());
     setSnapshotTime(toDatetimeLocalValue(new Date().toISOString()));
   };
 
   const submitSnapshot = async () => {
     if (!snapshotTarget?.asset_id) return;
     const marketValue = Number(snapshotValue);
+    const quantity = Number(snapshotQuantity);
     if (!Number.isFinite(marketValue) || marketValue < 0) {
-      notification.error('Current holding must be a valid non-negative number.');
+      notification.error('当前市值必须是有效的非负数字。');
+      return;
+    }
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      notification.error('持仓份额必须是有效的非负数字。');
       return;
     }
     setSavingSnapshot(true);
@@ -124,20 +137,20 @@ export default function PositionsPage() {
         user_id: DEFAULT_USER_ID,
         asset_id: snapshotTarget.asset_id,
         valuation_time: new Date(snapshotTime).toISOString(),
-        quantity: marketValue,
-        price: 1,
+        quantity,
+        price: quantity > 0 ? marketValue / quantity : null,
         market_value: marketValue,
         currency: snapshotTarget.currency,
         source: 'manual',
         is_estimated: false,
       });
-      notification.success('Position snapshot saved.');
+      notification.success('持仓快照已保存。');
       setSnapshotTarget(null);
       await queryClient.invalidateQueries({ queryKey: ['positions'] });
       await queryClient.invalidateQueries({ queryKey: ['performance'] });
       await queryClient.invalidateQueries({ queryKey: ['performance-audit'] });
     } catch (error) {
-      notification.error(error instanceof Error ? error.message : 'Failed to save snapshot.');
+      notification.error(error instanceof Error ? error.message : '保存持仓快照失败。');
     } finally {
       setSavingSnapshot(false);
     }
@@ -146,7 +159,7 @@ export default function PositionsPage() {
   const columns = [
     {
       key: 'asset_name',
-      header: 'Product',
+      header: '产品',
       sortable: true,
       render: (row: Position) => (
         <Stack spacing={0.25}>
@@ -157,15 +170,16 @@ export default function PositionsPage() {
         </Stack>
       ),
     },
-    { key: 'asset_type', header: 'Type', render: (row: Position) => row.asset_type },
-    { key: 'currency', header: 'Currency', render: (row: Position) => row.currency ?? '-' },
-    { key: 'quantity', header: 'Quantity', align: 'right' as const, render: (row: Position) => formatNumber(row.quantity, 6) },
-    { key: 'native_cost', header: 'Native Cost', align: 'right' as const, render: (row: Position) => formatPositionCost(row) },
-    { key: 'attributed_cost_basis_cny', header: 'Attributed Cost', align: 'right' as const, render: (row: Position) => formatAttributionCost(row) },
-    { key: 'legacy_cost_basis_cny', header: 'Legacy Cost', align: 'right' as const, render: (row: Position) => formatLegacyCost(row) },
+    { key: 'asset_type', header: '资产类型', render: (row: Position) => row.asset_type },
+    { key: 'currency', header: '币种', render: (row: Position) => row.currency ?? '-' },
+    { key: 'quantity', header: '持仓份额/数量', align: 'right' as const, render: (row: Position) => formatNumber(row.quantity, 6) },
+    { key: 'current_value_native', header: '持仓金额', align: 'right' as const, render: (row: Position) => formatHoldingAmount(row) },
+    { key: 'native_cost', header: '原币成本', align: 'right' as const, render: (row: Position) => formatPositionCost(row) },
+    { key: 'attributed_cost_basis_cny', header: '归因成本(人民币)', align: 'right' as const, render: (row: Position) => formatAttributionCost(row) },
+    { key: 'legacy_cost_basis_cny', header: '旧口径成本(人民币)', align: 'right' as const, render: (row: Position) => formatLegacyCost(row) },
     {
       key: 'cost_diff',
-      header: 'Cost Diff',
+      header: '成本差异',
       align: 'right' as const,
       render: (row: Position) => (
         <Typography color={valueColor((row.attributed_cost_basis_cny ?? 0) - (row.legacy_cost_basis_cny ?? 0))}>
@@ -173,11 +187,11 @@ export default function PositionsPage() {
         </Typography>
       ),
     },
-    { key: 'current_price', header: 'Price/Rate', align: 'right' as const, render: (row: Position) => formatNumber(row.current_price, 6) },
-    { key: 'current_value_cny', header: 'Value', align: 'right' as const, render: (row: Position) => formatCurrency(row.current_value_cny) },
+    { key: 'current_price', header: '价格/汇率', align: 'right' as const, render: (row: Position) => formatNumber(row.current_price, 6) },
+    { key: 'current_value_cny', header: '当前市值', align: 'right' as const, render: (row: Position) => formatCurrency(row.current_value_cny) },
     {
       key: 'investment_pnl_cny',
-      header: 'Investment PnL',
+      header: '投资收益',
       align: 'right' as const,
       render: (row: Position) => (
         <Typography color={valueColor(row.investment_pnl_cny)}>
@@ -187,7 +201,7 @@ export default function PositionsPage() {
     },
     {
       key: 'fx_pnl_cny',
-      header: 'FX PnL',
+      header: '汇率收益',
       align: 'right' as const,
       render: (row: Position) => (
         <Typography color={valueColor(row.fx_pnl_cny)}>
@@ -197,7 +211,7 @@ export default function PositionsPage() {
     },
     {
       key: 'unrealized_pnl_cny',
-      header: 'PnL',
+      header: '总收益',
       sortable: true,
       align: 'right' as const,
       render: (row: Position) => (
@@ -208,7 +222,7 @@ export default function PositionsPage() {
     },
     {
       key: 'return_pct',
-      header: 'Return',
+      header: '收益率',
       sortable: true,
       align: 'right' as const,
       render: (row: Position) => (
@@ -219,12 +233,12 @@ export default function PositionsPage() {
     },
     {
       key: 'valuation_status',
-      header: 'Status',
+      header: '估值状态',
       render: (row: Position) => <Chip size="small" color={statusColor(row.valuation_status)} label={row.valuation_status ?? 'OK'} />,
     },
     {
       key: 'attribution_status',
-      header: 'Attribution',
+      header: '资金归因',
       render: (row: Position) => (
         <Stack spacing={0.5}>
           <Chip size="small" color={attributionColor(row.attribution_status)} label={row.attribution_status ?? '-'} />
@@ -238,7 +252,7 @@ export default function PositionsPage() {
     },
     {
       key: 'actions',
-      header: 'Actions',
+      header: '操作',
       render: (row: Position) =>
         isAmountValuedPosition(row) && row.asset_id ? (
           <Button size="small" onClick={() => openSnapshotDialog(row)}>
@@ -325,13 +339,13 @@ export default function PositionsPage() {
               </Grid>
             </Grid>
 
-            <DataTable columns={columns} rows={query.data?.positions ?? []} />
+            <DataTable columns={columns} rows={query.data?.positions ?? []} stickyHeader maxHeight={640} />
           </Stack>
         )}
       </SectionCard>
 
       <Dialog open={Boolean(snapshotTarget)} onClose={() => setSnapshotTarget(null)} fullWidth maxWidth="sm">
-        <DialogTitle>Current Holding Snapshot</DialogTitle>
+        <DialogTitle>补充持仓快照</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ pt: 1 }}>
             <Box>
@@ -341,15 +355,23 @@ export default function PositionsPage() {
               </Typography>
             </Box>
             <TextField
-              label="Current Holding Amount"
+              label="持仓份额"
               type="number"
-              value={snapshotValue}
-              onChange={(event) => setSnapshotValue(event.target.value)}
-              helperText="For amount-valued products, this is the bank/broker displayed current holding amount."
+              value={snapshotQuantity}
+              onChange={(event) => setSnapshotQuantity(event.target.value)}
+              helperText="基金/理财页面展示的当前份额；没有份额时可先填当前持仓金额。"
               fullWidth
             />
             <TextField
-              label="Snapshot Time"
+              label="当前市值"
+              type="number"
+              value={snapshotValue}
+              onChange={(event) => setSnapshotValue(event.target.value)}
+              helperText={`以 ${snapshotTarget?.currency ?? '原币'} 计价的当前持仓金额。`}
+              fullWidth
+            />
+            <TextField
+              label="快照时间"
               type="datetime-local"
               value={snapshotTime}
               onChange={(event) => setSnapshotTime(event.target.value)}
@@ -359,9 +381,9 @@ export default function PositionsPage() {
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setSnapshotTarget(null)}>Cancel</Button>
+          <Button onClick={() => setSnapshotTarget(null)}>取消</Button>
           <Button variant="contained" disabled={savingSnapshot} onClick={() => void submitSnapshot()}>
-            Save
+            保存
           </Button>
         </DialogActions>
       </Dialog>

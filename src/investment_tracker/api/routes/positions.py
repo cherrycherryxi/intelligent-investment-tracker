@@ -10,15 +10,14 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 
 from investment_tracker.data.db import get_db_session
-from investment_tracker.data.enums import AssetType, EventType
+from investment_tracker.data.enums import AssetType
 from investment_tracker.data.models import Asset, AssetLedgerEntry, Attribution, AttributionGap, CashLedgerEntry, ExchangeRate, FundingLot, PortfolioEvent, ValuationSnapshot
-from investment_tracker.data.services import AttributionStatusTracker, AttributionStore, PerformanceService
+from investment_tracker.data.services import AttributionStatusTracker, AttributionStore
 
 
 router = APIRouter(prefix="/api/positions", tags=["positions"])
 
 AMOUNT_VALUED_ASSET_TYPES = {AssetType.BOND, AssetType.FUND, AssetType.WEALTH_PRODUCT}
-INVESTMENT_POOL_EVENTS = {EventType.FX_BUY, EventType.FX_SELL, EventType.FX_SWAP, EventType.MANUAL_ADJUSTMENT}
 
 
 def _to_float(value: Optional[Decimal], pattern: str = "0.01") -> Optional[float]:
@@ -76,11 +75,30 @@ def _attribution_summary(session, *, asset_id: int) -> dict:
     }
 
 
+def _build_position_totals(positions: list[dict]) -> dict:
+    known_costs = [Decimal(str(item["cost_basis_cny"])) for item in positions if item.get("cost_basis_cny") is not None]
+    known_values = [Decimal(str(item["current_value_cny"])) for item in positions if item.get("current_value_cny") is not None]
+    known_pnls = [Decimal(str(item["unrealized_pnl_cny"])) for item in positions if item.get("unrealized_pnl_cny") is not None]
+    known_investment_pnls = [Decimal(str(item["investment_pnl_cny"])) for item in positions if item.get("investment_pnl_cny") is not None]
+    known_fx_pnls = [Decimal(str(item["fx_pnl_cny"])) for item in positions if item.get("fx_pnl_cny") is not None]
+
+    total_cost = sum(known_costs, Decimal("0")) if known_costs else None
+    total_pnl = sum(known_pnls, Decimal("0")) if known_pnls else None
+
+    return {
+        "total_cost_cny": _to_float(total_cost, "0.01"),
+        "total_value_cny": _to_float(sum(known_values, Decimal("0")), "0.01") if known_values else None,
+        "total_pnl_cny": _to_float(total_pnl, "0.01"),
+        "total_investment_pnl_cny": _to_float(sum(known_investment_pnls, Decimal("0")), "0.01") if known_investment_pnls else None,
+        "total_fx_pnl_cny": _to_float(sum(known_fx_pnls, Decimal("0")), "0.01") if known_fx_pnls else None,
+        "missing_rates": [item["asset_code"] for item in positions if item["valuation_status"] == "RATE_MISSING"],
+        "missing_valuations": [item["asset_code"] for item in positions if item["valuation_status"] == "VALUATION_MISSING"],
+        "total_return_pct": _to_float((total_pnl / total_cost * Decimal("100")) if total_cost and total_pnl is not None else Decimal("0"), "0.0001"),
+    }
+
+
 def _build_cash_positions(session, *, user_id: int, cutoff: datetime) -> list[dict]:
     balances: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    native_cost_by_currency: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    cny_cost_by_currency: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    has_cny_cost: dict[str, bool] = defaultdict(bool)
     rows = (
         session.query(CashLedgerEntry)
         .join(PortfolioEvent, PortfolioEvent.id == CashLedgerEntry.event_id)
@@ -92,16 +110,27 @@ def _build_cash_positions(session, *, user_id: int, cutoff: datetime) -> list[di
         if currency == "CNY" and row.is_external_flow:
             continue
         balances[currency] += Decimal(str(row.amount_delta))
-        event = row.event
-        if event and event.event_type in INVESTMENT_POOL_EVENTS and currency != "CNY":
-            amount = Decimal(str(row.amount_delta))
-            native_cost_by_currency[currency] += amount
-            if row.rmb_amount is not None:
-                cny_cost_by_currency[currency] += Decimal("1" if amount >= 0 else "-1") * Decimal(str(row.rmb_amount))
-                has_cny_cost[currency] = True
-            elif row.fx_rate_to_cny is not None:
-                cny_cost_by_currency[currency] += amount * Decimal(str(row.fx_rate_to_cny))
-                has_cny_cost[currency] = True
+
+    remaining_native_by_currency: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    remaining_basis_by_currency: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    has_lots_by_currency: dict[str, bool] = defaultdict(bool)
+    has_missing_basis_by_currency: dict[str, bool] = defaultdict(bool)
+    lots = (
+        session.query(FundingLot)
+        .filter(
+            FundingLot.user_id == user_id,
+            FundingLot.remaining_amount > 0,
+        )
+        .all()
+    )
+    for lot in lots:
+        currency = lot.currency.upper()
+        has_lots_by_currency[currency] = True
+        remaining_native_by_currency[currency] += Decimal(str(lot.remaining_amount))
+        if lot.remaining_rmb_basis is None:
+            has_missing_basis_by_currency[currency] = True
+        else:
+            remaining_basis_by_currency[currency] += Decimal(str(lot.remaining_rmb_basis))
 
     positions = []
     for currency, balance in sorted(balances.items()):
@@ -109,8 +138,12 @@ def _build_cash_positions(session, *, user_id: int, cutoff: datetime) -> list[di
             continue
         rate = _latest_rate(session, currency, cutoff)
         value_cny = balance * rate if rate is not None else None
-        native_cost = native_cost_by_currency[currency] if currency != "CNY" else None
-        cost_basis_cny = cny_cost_by_currency[currency] if has_cny_cost[currency] else None
+        native_cost = remaining_native_by_currency[currency] if has_lots_by_currency[currency] and currency != "CNY" else None
+        cost_basis_cny = (
+            remaining_basis_by_currency[currency]
+            if has_lots_by_currency[currency] and not has_missing_basis_by_currency[currency]
+            else None
+        )
         pnl = value_cny - cost_basis_cny if value_cny is not None and cost_basis_cny is not None else None
         return_pct = (pnl / cost_basis_cny * Decimal("100")) if pnl is not None and cost_basis_cny else None
         investment_pnl_cny = Decimal("0") if pnl is not None and currency != "CNY" else pnl
@@ -143,7 +176,9 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
     cny_cost_by_asset: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
     has_cny_cost: dict[int, bool] = defaultdict(bool)
     attributed_cost_by_asset: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
+    attributed_native_by_asset: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
     has_attributed_cost: dict[int, bool] = defaultdict(bool)
+    raw_quantity_by_asset: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
 
     assets_by_id = {asset.id: asset for asset in session.query(Asset).all()}
     rows = (
@@ -156,6 +191,7 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
     for row in rows:
         asset_id = row.asset_id
         quantity_delta = Decimal(str(row.quantity_delta))
+        raw_quantity_by_asset[asset_id] += quantity_delta
         asset = assets_by_id.get(asset_id)
         if asset is not None and asset.asset_type in AMOUNT_VALUED_ASSET_TYPES and quantity_delta < 0:
             quantity_delta = max(quantity_delta, -quantity_by_asset[asset_id])
@@ -163,7 +199,7 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
         if row.cash_amount is None:
             continue
         cash_amount = abs(Decimal(str(row.cash_amount)))
-        signed_amount = cash_amount if quantity_delta > 0 else -abs(quantity_delta)
+        signed_amount = cash_amount if quantity_delta > 0 else -cash_amount
         native_cost_by_asset[asset_id] += signed_amount
         if row.fx_rate_to_cny is not None:
             cny_cost_by_asset[asset_id] += signed_amount * Decimal(str(row.fx_rate_to_cny))
@@ -179,23 +215,37 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
         if row.target_asset_id is None:
             continue
         attributed_cost_by_asset[row.target_asset_id] += Decimal(str(row.rmb_basis))
+        attributed_native_by_asset[row.target_asset_id] += Decimal(str(row.native_amount))
         has_attributed_cost[row.target_asset_id] = True
 
-    if not quantity_by_asset:
-        return []
-
-    assets = {asset_id: asset for asset_id, asset in assets_by_id.items() if asset_id in quantity_by_asset}
     valuations = _latest_valuations(session, user_id=user_id, cutoff=cutoff)
+    valuation_asset_ids = {
+        asset_id
+        for asset_id, valuation in valuations.items()
+        if Decimal(str(valuation.quantity)) > 0 or Decimal(str(valuation.market_value)) > 0
+    }
+    candidate_asset_ids = set(quantity_by_asset) | valuation_asset_ids
+    if not candidate_asset_ids:
+        return []
+    assets = {asset_id: asset for asset_id, asset in assets_by_id.items() if asset_id in candidate_asset_ids}
 
     positions = []
-    for asset_id, quantity in sorted(quantity_by_asset.items(), key=lambda item: assets.get(item[0]).asset_code if assets.get(item[0]) else ""):
-        if quantity == 0:
-            continue
+    for asset_id in sorted(candidate_asset_ids, key=lambda item: assets.get(item).asset_code if assets.get(item) else ""):
+        quantity = quantity_by_asset[asset_id]
         asset = assets.get(asset_id)
         if asset is None:
             continue
 
         valuation = valuations.get(asset_id)
+        has_positive_snapshot = (
+            asset.asset_type in AMOUNT_VALUED_ASSET_TYPES
+            and valuation is not None
+            and (Decimal(str(valuation.quantity)) > 0 or Decimal(str(valuation.market_value)) > 0)
+            and raw_quantity_by_asset[asset_id] < 0
+        )
+        if quantity == 0 and not has_positive_snapshot:
+            continue
+
         rate = None
         market_value = None
         current_value_cny = None
@@ -231,7 +281,7 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
             if has_cny_cost[asset_id]
             else None
         )
-        native_cost = native_cost_by_asset[asset_id]
+        native_cost = attributed_native_by_asset[asset_id] if has_attributed_cost[asset_id] else native_cost_by_asset[asset_id]
         attributed_cost_basis_cny = attributed_cost_by_asset[asset_id] if has_attributed_cost[asset_id] else None
         attribution_status = AttributionStatusTracker(session).compute_status(asset_id=asset_id, user_id=user_id)
         investment_pnl_cny = None
@@ -253,7 +303,7 @@ def _build_asset_positions(session, *, user_id: int, cutoff: datetime) -> list[d
             investment_pnl_cny = pnl
             fx_pnl_cny = Decimal("0") if pnl is not None else None
             return_pct = (pnl / cost_basis_cny * Decimal("100")) if pnl is not None and cost_basis_cny else None
-        display_quantity = market_value if valuation is not None and asset.asset_type in AMOUNT_VALUED_ASSET_TYPES else quantity
+        display_quantity = Decimal(str(valuation.quantity)) if valuation is not None else quantity
 
         positions.append(
             {
@@ -324,37 +374,7 @@ async def list_positions(
     else:
         positions.sort(key=lambda item: item["asset_code"])
 
-    if asset_type is None:
-        overview = PerformanceService(session).performance(user_id=user_id, valuation_time=cutoff)["overview"]
-        totals = {
-            "total_cost_cny": overview["net_invested_cny"],
-            "total_value_cny": overview["current_total_assets_cny"],
-            "total_pnl_cny": overview["total_pnl_cny"],
-            "total_investment_pnl_cny": overview["investment_pnl_cny"],
-            "total_fx_pnl_cny": overview["fx_pnl_cny"],
-            "missing_rates": [item["asset_code"] for item in positions if item["valuation_status"] == "RATE_MISSING"],
-            "missing_valuations": [item["asset_code"] for item in positions if item["valuation_status"] == "VALUATION_MISSING"],
-            "total_return_pct": overview["total_return_pct"],
-        }
-    else:
-        non_cash_positions = [item for item in positions if item["asset_type"] != AssetType.CASH.value]
-        known_costs = [item["cost_basis_cny"] for item in non_cash_positions if item["cost_basis_cny"] is not None]
-        known_values = [item["current_value_cny"] for item in positions if item["current_value_cny"] is not None]
-        known_pnls = [item["unrealized_pnl_cny"] for item in non_cash_positions if item["unrealized_pnl_cny"] is not None]
-        known_investment_pnls = [item["investment_pnl_cny"] for item in non_cash_positions if item.get("investment_pnl_cny") is not None]
-        known_fx_pnls = [item["fx_pnl_cny"] for item in non_cash_positions if item.get("fx_pnl_cny") is not None]
-        total_cost = round(sum(known_costs), 2) if known_costs else None
-        total_pnl = round(sum(known_pnls), 2) if known_pnls else None
-        totals = {
-            "total_cost_cny": total_cost,
-            "total_value_cny": round(sum(known_values), 2) if known_values else None,
-            "total_pnl_cny": total_pnl,
-            "total_investment_pnl_cny": round(sum(known_investment_pnls), 2) if known_investment_pnls else None,
-            "total_fx_pnl_cny": round(sum(known_fx_pnls), 2) if known_fx_pnls else None,
-            "missing_rates": [item["asset_code"] for item in positions if item["valuation_status"] == "RATE_MISSING"],
-            "missing_valuations": [item["asset_code"] for item in positions if item["valuation_status"] == "VALUATION_MISSING"],
-        }
-        totals["total_return_pct"] = round((total_pnl / total_cost * 100) if total_cost and total_pnl is not None else 0.0, 4)
+    totals = _build_position_totals(positions)
 
     return {"positions": positions, "totals": totals}
 

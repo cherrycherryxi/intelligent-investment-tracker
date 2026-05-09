@@ -78,6 +78,38 @@ def test_fx_swap_consumes_source_lot_and_creates_target_lot_with_inherited_basis
     assert session.query(AttributionGap).count() == 0
 
 
+def test_fx_sell_consumes_sold_currency_lots() -> None:
+    session = _session()
+    service = PortfolioEventService(session)
+    service.create_event(
+        user_id=1,
+        payload={
+            "event_type": "FX_BUY",
+            "event_time": datetime(2026, 5, 1, tzinfo=timezone.utc),
+            "cash_entries": [
+                {"currency": "USD", "amount_delta": 1000, "rmb_amount": 7200, "fx_rate_to_cny": 7.2},
+            ],
+        },
+    )
+
+    service.create_event(
+        user_id=1,
+        payload={
+            "event_type": "FX_SELL",
+            "event_time": datetime(2026, 5, 2, tzinfo=timezone.utc),
+            "cash_entries": [
+                {"currency": "USD", "amount_delta": -250, "rmb_amount": 1800, "fx_rate_to_cny": 7.2},
+                {"currency": "CNY", "amount_delta": 1800, "rmb_amount": 1800, "fx_rate_to_cny": 1},
+            ],
+        },
+    )
+
+    lot = session.query(FundingLot).one()
+    assert Decimal(lot.remaining_amount) == Decimal("750.000000")
+    assert Decimal(lot.remaining_rmb_basis) == Decimal("5400.00")
+    assert session.query(AttributionGap).count() == 0
+
+
 def test_fx_swap_with_insufficient_source_lots_marks_target_basis_missing() -> None:
     session = _session()
     service = PortfolioEventService(session)

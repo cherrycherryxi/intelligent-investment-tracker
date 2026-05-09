@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List
 
 from investment_tracker.mcp_tools.base import MCPTool, ToolMetadata, ToolRegistry
+from investment_tracker.utils.agent_run_logger import log_agent_event
 
 
 class MCPServer:
@@ -24,6 +25,6 @@ class MCPServer:
         return list(self.registry.list_metadata())
 
     def call_tool(self, tool_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        log_agent_event("Tool dispatch", data={"tool_name": tool_name, "payload": payload})
         tool = self.registry.get(tool_name)
         return tool.execute(payload)
-

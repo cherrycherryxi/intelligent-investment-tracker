@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 
+from investment_tracker.data.asset_identity import AssetIdentityResolver
 from investment_tracker.data.enums import AssetType, EventType, RecordStatus, TransactionDirection
 from investment_tracker.data.models import PortfolioEvent, Transaction
 from investment_tracker.data.repositories import TransactionRepository
-from investment_tracker.data.services import PortfolioEventService
+from investment_tracker.data.services import AttributionRebuildService, PortfolioEventService
 from investment_tracker.mcp_tools.exchange_rate_tool import ExchangeRateTool
 from investment_tracker.utils.backup import BackupService
 from investment_tracker.utils.xlsx_reader import WorkbookSheet, XlsxReader
@@ -35,11 +37,13 @@ class ExcelImportPreviewService:
         *,
         workbook_reader: Optional[XlsxReader] = None,
         exchange_rate_tool: Optional[ExchangeRateTool] = None,
+        asset_identity_resolver: Optional[AssetIdentityResolver] = None,
         fill_missing_cny: bool = False,
         enrich_asset_rates: bool = False,
     ) -> None:
         self.workbook_reader = workbook_reader or XlsxReader()
         self.exchange_rate_tool = exchange_rate_tool or ExchangeRateTool()
+        self.asset_identity_resolver = asset_identity_resolver or AssetIdentityResolver()
         self.fill_missing_cny = fill_missing_cny
         self.enrich_asset_rates = enrich_asset_rates
         self._rate_cache: Dict[Tuple[str, str], Optional[float]] = {}
@@ -123,6 +127,7 @@ class ExcelImportPreviewService:
         selected_transactions: List[Dict[str, Any]] = []
         selected_events: List[Dict[str, Any]] = []
         skipped_duplicate_count = 0
+        patched_event_count = 0
         seen_transaction_keys: set[Tuple[Any, ...]] = set()
         seen_event_keys: set[Tuple[Any, ...]] = set()
         for item in selected_rows:
@@ -138,6 +143,25 @@ class ExcelImportPreviewService:
 
             event = item.get("portfolio_event")
             if event:
+                existing_by_source_id = self._find_existing_event_by_source_transaction_id(
+                    user_id=user_id,
+                    payload=event,
+                    repository=repository,
+                )
+                if existing_by_source_id is not None:
+                    patched_event_count += self._patch_event_redemption_quantity(existing_by_source_id, event)
+                    skipped_duplicate_count += 1
+                    continue
+                if self._event_has_explicit_redemption_quantity(event):
+                    existing_event = self._find_existing_event_for_quantity_supplement(
+                        user_id=user_id,
+                        payload=event,
+                        repository=repository,
+                    )
+                    if existing_event is not None:
+                        patched_event_count += self._patch_event_redemption_quantity(existing_event, event)
+                        skipped_duplicate_count += 1
+                        continue
                 key = self._event_duplicate_key(user_id=user_id, payload=event)
                 if key in seen_event_keys or self._event_exists(user_id=user_id, payload=event, key=key, repository=repository):
                     skipped_duplicate_count += 1
@@ -152,15 +176,22 @@ class ExcelImportPreviewService:
             event_service = PortfolioEventService(repository.session)
             for event_payload in selected_events:
                 created_events.append(event_service.create_event(user_id=user_id, payload=event_payload, commit=False))
+            if patched_event_count:
+                AttributionRebuildService(repository.session).rebuild_user_attribution(user_id=user_id)
             repository.session.commit()
             BackupService(repository.session).create_backup(reason="portfolio_events_imported")
             for event in created_events:
                 repository.session.refresh(event)
+        elif patched_event_count:
+            AttributionRebuildService(repository.session).rebuild_user_attribution(user_id=user_id)
+            repository.session.commit()
+            BackupService(repository.session).create_backup(reason="portfolio_events_quantity_supplemented")
 
         return {
             "source_name": source_name,
             "imported_count": len(created),
             "imported_event_count": len(created_events),
+            "patched_event_count": patched_event_count,
             "skipped_pending_count": 0 if include_pending else len(preview["pending_review"]),
             "skipped_duplicate_count": skipped_duplicate_count,
             "failed_count": len(preview["failed"]),
@@ -246,6 +277,134 @@ class ExcelImportPreviewService:
             asset_entries,
         )
 
+    def _event_supplement_key(self, *, user_id: int, payload: Dict[str, Any]) -> Tuple[Any, ...]:
+        cash_entries = tuple(
+            sorted(
+                (
+                    str(item.get("currency") or "").upper(),
+                    self._decimal_key(item.get("amount_delta")),
+                    bool(item.get("is_external_flow", False)),
+                    self._decimal_key(item.get("rmb_amount")),
+                )
+                for item in payload.get("cash_entries", [])
+            )
+        )
+        asset_entries = tuple(
+            sorted(
+                (
+                    str((item.get("asset") or {}).get("asset_type") or item.get("asset_type") or "").upper(),
+                    str((item.get("asset") or {}).get("asset_code") or item.get("asset_code") or item.get("asset_id") or "").upper(),
+                    str((item.get("asset") or {}).get("currency") or item.get("currency") or item.get("cash_currency") or "").upper(),
+                    str(item.get("cash_currency") or "").upper(),
+                    self._decimal_key(item.get("cash_amount")),
+                )
+                for item in payload.get("asset_entries", [])
+            )
+        )
+        return (
+            user_id,
+            str(payload.get("event_type") or "").upper(),
+            self._datetime_key(payload.get("event_time")),
+            cash_entries,
+            asset_entries,
+        )
+
+    def _event_has_explicit_redemption_quantity(self, payload: Dict[str, Any]) -> bool:
+        if str(payload.get("event_type") or "").upper() not in {EventType.FUND_SELL.value, EventType.WEALTH_REDEEM.value}:
+            return False
+        return any(item.get("_quantity_source") == "redemption_quantity" for item in payload.get("asset_entries", []))
+
+    def _source_transaction_id(self, payload: Dict[str, Any]) -> Optional[str]:
+        raw_text = payload.get("raw_text")
+        if not raw_text:
+            return None
+        try:
+            raw = ast.literal_eval(str(raw_text))
+        except (SyntaxError, ValueError):
+            return None
+        if not isinstance(raw, dict):
+            return None
+        value = raw.get("交易ID")
+        return str(value).strip() if value not in (None, "") else None
+
+    def _find_existing_event_by_source_transaction_id(
+        self,
+        *,
+        user_id: int,
+        payload: Dict[str, Any],
+        repository: TransactionRepository,
+    ) -> Optional[PortfolioEvent]:
+        source_transaction_id = self._source_transaction_id(payload)
+        if not source_transaction_id:
+            return None
+        candidates = (
+            repository.session.query(PortfolioEvent)
+            .filter(
+                PortfolioEvent.user_id == user_id,
+                PortfolioEvent.event_type == EventType[str(payload.get("event_type"))],
+            )
+            .all()
+        )
+        for row in candidates:
+            if self._source_transaction_id(self._event_payload_from_model(row)) == source_transaction_id:
+                return row
+        return None
+
+    def _find_existing_event_for_quantity_supplement(
+        self,
+        *,
+        user_id: int,
+        payload: Dict[str, Any],
+        repository: TransactionRepository,
+    ) -> Optional[PortfolioEvent]:
+        key = self._event_supplement_key(user_id=user_id, payload=payload)
+        candidates = (
+            repository.session.query(PortfolioEvent)
+            .filter(
+                PortfolioEvent.user_id == user_id,
+                PortfolioEvent.event_type == EventType[str(payload.get("event_type"))],
+            )
+            .all()
+        )
+        for row in candidates:
+            if self._event_supplement_key(user_id=user_id, payload=self._event_payload_from_model(row)) == key:
+                return row
+        return None
+
+    def _patch_event_redemption_quantity(self, existing_event: PortfolioEvent, payload: Dict[str, Any]) -> int:
+        patched = 0
+        incoming_entries = payload.get("asset_entries", [])
+        existing_entries = list(existing_event.asset_ledger_entries)
+        for incoming in incoming_entries:
+            if incoming.get("_quantity_source") != "redemption_quantity":
+                continue
+            incoming_asset = incoming.get("asset") or {}
+            incoming_code = str(incoming_asset.get("asset_code") or incoming.get("asset_code") or "").upper()
+            incoming_cash_currency = str(incoming.get("cash_currency") or "").upper()
+            incoming_cash_amount = self._decimal_key(incoming.get("cash_amount"))
+            target = next(
+                (
+                    entry
+                    for entry in existing_entries
+                    if entry.asset is not None
+                    and entry.asset.asset_code.upper() == incoming_code
+                    and entry.cash_currency.upper() == incoming_cash_currency
+                    and self._decimal_key(entry.cash_amount) == incoming_cash_amount
+                ),
+                None,
+            )
+            if target is None:
+                continue
+            quantity_delta = Decimal(str(incoming["quantity_delta"]))
+            unit_price = Decimal(str(incoming["unit_price"])) if incoming.get("unit_price") not in (None, "") else None
+            if Decimal(str(target.quantity_delta)) != quantity_delta:
+                target.quantity_delta = quantity_delta
+                patched += 1
+            if unit_price is not None and (target.unit_price is None or Decimal(str(target.unit_price)) != unit_price):
+                target.unit_price = unit_price
+                patched += 1
+        return 1 if patched else 0
+
     def _event_exists(
         self,
         *,
@@ -268,6 +427,7 @@ class ExcelImportPreviewService:
         return {
             "event_type": row.event_type.value,
             "event_time": row.event_time,
+            "raw_text": row.raw_text,
             "cash_entries": [
                 {
                     "currency": item.currency,
@@ -297,7 +457,10 @@ class ExcelImportPreviewService:
         parsed = self._parse_trade_time(value)
         if parsed is None:
             return ""
-        return parsed.replace(tzinfo=None).isoformat(timespec="seconds")
+        normalized = parsed.replace(tzinfo=None)
+        if normalized.microsecond >= 500_000:
+            normalized = normalized + timedelta(seconds=1)
+        return normalized.replace(microsecond=0).isoformat(timespec="seconds")
 
     def _decimal_key(self, value: Any) -> str:
         if value in (None, ""):
@@ -566,15 +729,19 @@ class ExcelImportPreviewService:
                 asset_entries: List[Dict[str, Any]] = []
             else:
                 event_type = EventType.FUND_SELL if asset_type == AssetType.FUND else EventType.WEALTH_REDEEM
+                redemption_quantity = self._redemption_quantity(row)
+                quantity_delta = -(redemption_quantity if redemption_quantity not in (None, 0) else buy_amount)
+                unit_price = round(buy_amount / redemption_quantity, 6) if redemption_quantity not in (None, 0) else 1
                 asset_entries = [
                     {
                         "asset": asset,
-                        "quantity_delta": -buy_amount,
+                        "quantity_delta": quantity_delta,
                         "cash_currency": buy_currency,
                         "cash_amount": buy_amount,
-                        "unit_price": 1,
+                        "unit_price": unit_price,
                         "fx_rate_to_cny": fx_rate,
                         "description": note or f"{asset_type.value} redemption",
+                        "_quantity_source": "redemption_quantity" if redemption_quantity not in (None, 0) else "cash_amount",
                     }
                 ]
             event = self._event_payload(
@@ -597,6 +764,13 @@ class ExcelImportPreviewService:
 
         errors.append(f"{asset_type.value} 记录缺少可用的现金流金额")
         return RowComputation(transaction=None, portfolio_event=None, warnings=warnings, errors=errors)
+
+    def _redemption_quantity(self, row: Dict[str, Any]) -> Optional[float]:
+        for column in ("赎回份额", "赎回数量", "持仓变动", "份额"):
+            value = self._to_float(row.get(column))
+            if value not in (None, 0):
+                return abs(value)
+        return None
 
     def _asset_type_for_category(self, *, row: Dict[str, Any], default: AssetType) -> AssetType:
         name = str(row.get("名称") or "")
@@ -693,6 +867,23 @@ class ExcelImportPreviewService:
 
     def _asset_payload(self, *, asset_type: AssetType, name: str, currency: Optional[str]) -> Dict[str, Any]:
         normalized_currency = currency or "UNKNOWN"
+        identity = self.asset_identity_resolver.resolve(
+            asset_type=asset_type,
+            name=name,
+            currency=normalized_currency,
+        )
+        if identity is not None:
+            return {
+                "asset_type": asset_type.value,
+                "asset_code": identity.asset_code,
+                "asset_name": identity.asset_name,
+                "currency": normalized_currency,
+                "metadata_json": {
+                    "source_name": name,
+                    "identity_source": identity.source,
+                    "identity_confidence": identity.confidence,
+                },
+            }
         digest = hashlib.sha1(f"{asset_type.value}|{normalized_currency}|{name}".encode("utf-8")).hexdigest()[:12].upper()
         return {
             "asset_type": asset_type.value,

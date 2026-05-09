@@ -7,6 +7,7 @@ export interface Position {
   asset_name?: string;
   currency?: string;
   quantity: number;
+  ledger_quantity?: number | null;
   average_cost_cny?: number | null;
   cost_basis_cny?: number | null;
   legacy_cost_basis_cny?: number | null;

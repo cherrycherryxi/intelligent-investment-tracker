@@ -4,6 +4,8 @@ export interface PerformanceOverview {
   total_pnl_cny: number;
   total_return_pct: number;
   investment_pnl_cny: number;
+  realized_investment_pnl_cny?: number;
+  unrealized_investment_pnl_cny?: number;
   fx_pnl_cny: number;
   investment_pnl_ratio: number;
   fx_pnl_ratio: number;
@@ -45,6 +47,19 @@ export interface PerformanceDataQuality {
     currency: string;
     market_value: number;
   }>;
+  realized_closed_positions?: RealizedClosedPosition[];
+}
+
+export interface RealizedClosedPosition {
+  asset_id: number;
+  asset_code: string;
+  asset_name?: string | null;
+  currency: string;
+  buy_native: number;
+  sell_native: number;
+  realized_investment_pnl_native: number;
+  realized_investment_pnl_cny: number;
+  fx_rate_to_cny: number;
 }
 
 export interface PerformanceResponse {

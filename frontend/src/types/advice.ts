@@ -34,3 +34,30 @@ export interface AdviceResponse {
     };
   };
 }
+
+export type AdviceChatMode = 'chat' | 'generate_advice' | 'position_analysis' | 'transaction_analysis';
+
+export interface AdviceChatRequest {
+  user_id: number;
+  mode: AdviceChatMode;
+  message: string;
+  risk_preference: RiskPreference;
+}
+
+export interface AdviceChatResponse {
+  ok: boolean;
+  mode: AdviceChatMode;
+  result?: unknown;
+  portfolio_summary?: {
+    total_cost_cny?: number | null;
+    total_value_cny?: number | null;
+    total_pnl_cny?: number | null;
+    total_return_pct?: number | null;
+    positions_count?: number | null;
+  };
+  error?: {
+    message: string;
+    code?: string;
+    details?: Record<string, unknown>;
+  };
+}

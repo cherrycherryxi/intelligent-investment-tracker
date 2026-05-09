@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from investment_tracker.data.base import Base
 from investment_tracker.data.enums import AssetType, EventType
+from investment_tracker.data.models import AssetLedgerEntry
 from investment_tracker.data.repositories import TransactionRepository
 from investment_tracker.orchestration.excel_import_service import ExcelImportPreviewService
 from investment_tracker.utils.xlsx_reader import WorkbookSheet
@@ -33,6 +34,19 @@ class StubWorkbookReader:
                 ],
             )
         ]
+
+
+class RedemptionWorkbookReader:
+    def __init__(self, *, with_redemption_quantity: bool) -> None:
+        self.with_redemption_quantity = with_redemption_quantity
+
+    def read(self, workbook_bytes):
+        headers = ["交易ID", "交易时间", "类别", "名称", "卖出货币", "卖出金额", "买入货币", "买入金额", "备注"]
+        row = ["FUND001", "2025-01-03 10:00:00", "基金", "美元基金", None, None, "USD", 120, "基金收入"]
+        if self.with_redemption_quantity:
+            headers.append("赎回份额")
+            row.append(100)
+        return [WorkbookSheet(name="外汇交易记录", rows=[headers, row])]
 
 
 @pytest.mark.skipif(not _FIXTURE.exists(), reason="requires local fixture investment_tracker_v5.xlsx")
@@ -229,6 +243,46 @@ def test_excel_import_treats_wealth_named_rows_as_wealth_even_when_category_is_f
     assert wealth_asset["asset_code"] == fund_asset["asset_code"]
 
 
+def test_excel_import_resolves_known_fund_aliases_to_real_fund_code() -> None:
+    service = ExcelImportPreviewService(exchange_rate_tool=StubExchangeRateTool())
+
+    buy = service._build_row_preview(
+        row_number=1,
+        row={
+            "交易ID": "FUND046",
+            "交易时间": "2025-10-22 23:41:00",
+            "类别": "基金",
+            "名称": "广发道琼斯石油指数（QDII-LOF）美元E",
+            "卖出货币": "USD",
+            "卖出金额": 100,
+            "买入货币": None,
+            "买入金额": None,
+            "备注": "基金支出",
+        },
+    )
+    redemption_with_missing_suffix = service._build_row_preview(
+        row_number=2,
+        row={
+            "交易ID": "FUND060",
+            "交易时间": "2025-11-19 15:50:00",
+            "类别": "基金",
+            "名称": "广发道琼斯石油指数（QDII-LOF）美元",
+            "卖出货币": None,
+            "卖出金额": None,
+            "买入货币": "USD",
+            "买入金额": 374.85,
+            "备注": "基金收入",
+        },
+    )
+
+    buy_asset = buy.portfolio_event["asset_entries"][0]["asset"]
+    redemption_asset = redemption_with_missing_suffix.portfolio_event["asset_entries"][0]["asset"]
+    assert buy_asset["asset_code"] == "019711"
+    assert redemption_asset["asset_code"] == "019711"
+    assert buy_asset["asset_name"] == "广发道琼斯石油指数(QDII-LOF)美元现汇E"
+    assert redemption_asset["metadata_json"]["source_name"] == "广发道琼斯石油指数（QDII-LOF）美元"
+
+
 def test_excel_confirm_import_skips_existing_semantic_duplicates() -> None:
     session = _session()
     repo = TransactionRepository(session)
@@ -253,6 +307,71 @@ def test_excel_confirm_import_skips_existing_semantic_duplicates() -> None:
     assert second["imported_count"] == 0
     assert second["imported_event_count"] == 0
     assert second["skipped_duplicate_count"] == 2
+
+
+def test_excel_import_skips_existing_event_with_same_source_transaction_id_even_when_semantics_change() -> None:
+    session = _session()
+    repo = TransactionRepository(session)
+    initial_service = ExcelImportPreviewService(
+        workbook_reader=RedemptionWorkbookReader(with_redemption_quantity=False),
+        exchange_rate_tool=StubExchangeRateTool(),
+    )
+    supplement_service = ExcelImportPreviewService(
+        workbook_reader=RedemptionWorkbookReader(with_redemption_quantity=True),
+        exchange_rate_tool=StubExchangeRateTool(),
+    )
+
+    initial_service.import_forex_transactions(
+        b"stub",
+        source_name="stub.xlsx",
+        user_id=1,
+        repository=repo,
+    )
+    second = supplement_service.import_forex_transactions(
+        b"stub",
+        source_name="stub.xlsx",
+        user_id=1,
+        repository=repo,
+    )
+
+    assert second["imported_event_count"] == 0
+    assert second["patched_event_count"] == 1
+    assert second["skipped_duplicate_count"] == 1
+
+
+def test_excel_import_can_patch_existing_redemption_quantity_only() -> None:
+    session = _session()
+    repo = TransactionRepository(session)
+    initial_service = ExcelImportPreviewService(
+        workbook_reader=RedemptionWorkbookReader(with_redemption_quantity=False),
+        exchange_rate_tool=StubExchangeRateTool(),
+    )
+    supplement_service = ExcelImportPreviewService(
+        workbook_reader=RedemptionWorkbookReader(with_redemption_quantity=True),
+        exchange_rate_tool=StubExchangeRateTool(),
+    )
+
+    first = initial_service.import_forex_transactions(
+        b"stub",
+        source_name="stub.xlsx",
+        user_id=1,
+        repository=repo,
+    )
+    second = supplement_service.import_forex_transactions(
+        b"stub",
+        source_name="stub.xlsx",
+        user_id=1,
+        repository=repo,
+    )
+
+    entry = session.query(AssetLedgerEntry).one()
+    assert first["imported_event_count"] == 1
+    assert second["imported_event_count"] == 0
+    assert second["patched_event_count"] == 1
+    assert second["skipped_duplicate_count"] == 1
+    assert float(entry.quantity_delta) == -100.0
+    assert float(entry.cash_amount) == 120.0
+    assert float(entry.unit_price) == 1.2
 
 
 def test_excel_import_missing_cny_amount_uses_primary_historical_rate() -> None:

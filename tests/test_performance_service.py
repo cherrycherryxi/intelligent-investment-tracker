@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from investment_tracker.data.base import Base
 from investment_tracker.data.enums import EventType, RateSourceType
-from investment_tracker.data.models import ExchangeRate
+from investment_tracker.data.models import Asset, ExchangeRate
 from investment_tracker.data.services import PerformanceService, PortfolioEventService
 
 
@@ -92,6 +92,150 @@ def test_fx_swap_changes_currency_pools_without_external_cny_flow() -> None:
     assert result["overview"]["net_invested_cny"] == 72000.0
     assert by_currency["USD"]["cash_balance"] == 5000.0
     assert by_currency["EUR"]["cash_balance"] == 4375.0
+
+
+def test_performance_splits_closed_fund_realized_investment_pnl() -> None:
+    session = _session()
+    _rate(session, "USD", "7.000000")
+    events = PortfolioEventService(session)
+    events.create_event(
+        user_id=1,
+        payload={
+            "event_type": EventType.FX_BUY.value,
+            "event_time": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+            "cash_entries": [
+                {"currency": "CNY", "amount_delta": -7200, "rmb_amount": 7200, "fx_rate_to_cny": 1, "is_external_flow": True},
+                {"currency": "USD", "amount_delta": 1000, "rmb_amount": 7200, "fx_rate_to_cny": 7.2},
+            ],
+        },
+    )
+    fund_asset = {"asset_type": "FUND", "asset_code": "USD-FUND", "asset_name": "USD Fund", "currency": "USD"}
+    events.create_event(
+        user_id=1,
+        payload={
+            "event_type": EventType.FUND_BUY.value,
+            "event_time": datetime(2026, 1, 2, tzinfo=timezone.utc).isoformat(),
+            "cash_entries": [{"currency": "USD", "amount_delta": -100, "fx_rate_to_cny": 7.2}],
+            "asset_entries": [
+                {"asset": fund_asset, "quantity_delta": 100, "cash_currency": "USD", "cash_amount": 100, "unit_price": 1}
+            ],
+        },
+    )
+    events.create_event(
+        user_id=1,
+        payload={
+            "event_type": EventType.FUND_SELL.value,
+            "event_time": datetime(2026, 1, 3, tzinfo=timezone.utc).isoformat(),
+            "cash_entries": [{"currency": "USD", "amount_delta": 120, "fx_rate_to_cny": 7.0}],
+            "asset_entries": [
+                {"asset": fund_asset, "quantity_delta": -120, "cash_currency": "USD", "cash_amount": 120, "unit_price": 1}
+            ],
+        },
+    )
+
+    result = PerformanceService(session).performance(user_id=1)
+    realized = result["data_quality"]["realized_closed_positions"][0]
+
+    assert result["overview"]["investment_pnl_cny"] == 140.0
+    assert result["overview"]["realized_investment_pnl_cny"] == 140.0
+    assert result["overview"]["unrealized_investment_pnl_cny"] == 0.0
+    assert realized["asset_code"] == "USD-FUND"
+    assert realized["buy_native"] == 100.0
+    assert realized["sell_native"] == 120.0
+    assert realized["realized_investment_pnl_native"] == 20.0
+
+
+def test_performance_ignores_stale_valuation_for_closed_asset() -> None:
+    session = _session()
+    _rate(session, "USD", "7.000000")
+    events = PortfolioEventService(session)
+    fund_asset = {"asset_type": "FUND", "asset_code": "CLOSED-FUND", "asset_name": "Closed Fund", "currency": "USD"}
+    events.create_event(
+        user_id=1,
+        payload={
+            "event_type": EventType.FUND_BUY.value,
+            "event_time": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+            "asset_entries": [
+                {"asset": fund_asset, "quantity_delta": 100, "cash_currency": "USD", "cash_amount": 100, "unit_price": 1}
+            ],
+        },
+    )
+    events.create_event(
+        user_id=1,
+        payload={
+            "event_type": EventType.FUND_SELL.value,
+            "event_time": datetime(2026, 1, 2, tzinfo=timezone.utc).isoformat(),
+            "asset_entries": [
+                {"asset": fund_asset, "quantity_delta": -100, "cash_currency": "USD", "cash_amount": 120, "unit_price": 1}
+            ],
+        },
+    )
+    asset_id = session.query(Asset.id).filter(Asset.asset_code == "CLOSED-FUND").scalar()
+    events.create_valuation(
+        user_id=1,
+        payload={
+            "asset_id": asset_id,
+            "valuation_time": datetime(2026, 1, 3, tzinfo=timezone.utc).isoformat(),
+            "quantity": 100,
+            "price": 1,
+            "market_value": 100,
+            "currency": "USD",
+            "source": "manual",
+            "is_estimated": False,
+        },
+    )
+
+    result = PerformanceService(session).performance(user_id=1)
+
+    assert result["overview"]["current_total_assets_cny"] == 0.0
+    assert result["by_asset_type"] == []
+
+
+def test_performance_keeps_amount_asset_open_when_snapshot_overrides_clamped_ledger() -> None:
+    session = _session()
+    _rate(session, "USD", "7.000000")
+    events = PortfolioEventService(session)
+    fund_asset = {"asset_type": "FUND", "asset_code": "OPEN-SNAPSHOT-FUND", "asset_name": "Open Snapshot Fund", "currency": "USD"}
+    events.create_event(
+        user_id=1,
+        payload={
+            "event_type": EventType.FUND_BUY.value,
+            "event_time": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+            "asset_entries": [
+                {"asset": fund_asset, "quantity_delta": 640, "cash_currency": "USD", "cash_amount": 640, "unit_price": 1}
+            ],
+        },
+    )
+    events.create_event(
+        user_id=1,
+        payload={
+            "event_type": EventType.FUND_SELL.value,
+            "event_time": datetime(2026, 1, 2, tzinfo=timezone.utc).isoformat(),
+            "asset_entries": [
+                {"asset": fund_asset, "quantity_delta": -1470, "cash_currency": "USD", "cash_amount": 245.68, "unit_price": 0.167129}
+            ],
+        },
+    )
+    asset_id = session.query(Asset.id).filter(Asset.asset_code == "OPEN-SNAPSHOT-FUND").scalar()
+    events.create_valuation(
+        user_id=1,
+        payload={
+            "asset_id": asset_id,
+            "valuation_time": datetime(2026, 1, 3, tzinfo=timezone.utc).isoformat(),
+            "quantity": 394.32,
+            "price": 1,
+            "market_value": 394.32,
+            "currency": "USD",
+            "source": "manual",
+            "is_estimated": False,
+        },
+    )
+
+    result = PerformanceService(session).performance(user_id=1)
+
+    assert result["overview"]["current_total_assets_cny"] == 2760.24
+    assert result["data_quality"]["realized_closed_positions"] == []
+    assert result["by_currency"][0]["asset_market_value_native"] == 394.32
 
 
 def test_amount_valued_assets_do_not_require_extra_valuation_snapshot() -> None:

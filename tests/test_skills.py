@@ -114,6 +114,56 @@ def test_transaction_analysis_skill() -> None:
 # risk_assessment_skill
 # ---------------------------------------------------------------------------
 
+def test_investment_advice_prompt_uses_analysis_context() -> None:
+    skill = InvestmentAdviceSkill(ai_client=StubAIClient("{}"))
+
+    prompt = skill.build_prompt(
+        {
+            "analysis_context": {
+                "portfolio_summary": {"total_value_cny": 1000, "total_fx_pnl_cny": -20},
+                "field_glossary": {"fx_pnl_cny": "汇率盈亏"},
+                "top_positions": [{"asset_code": "USD", "weight_pct": 40}],
+            }
+        }
+    )
+
+    assert "分析上下文 JSON" in prompt
+    assert "fx_pnl_cny" in prompt
+    assert "不要输出详细推理过程" in prompt
+    assert "Positions:" not in prompt
+
+
+def test_investment_advice_skill_extracts_json_from_markdown() -> None:
+    skill = InvestmentAdviceSkill(
+        ai_client=StubAIClient(
+            """
+            下面是分析结果：
+            ```json
+            {
+              "summary": "建议保持谨慎",
+              "actions": [{"asset_code": "USD", "action": "REVIEW", "rationale": "美元暴露较高"}],
+              "reasoning": "当前组合集中在美元资产。",
+              "warnings": ["请核对估值数据"]
+            }
+            ```
+            """
+        )
+    )
+
+    result = skill.execute({"positions": [{"asset_code": "USD"}], "risk_preference": "balanced"})
+
+    assert result["summary"] == "建议保持谨慎"
+    assert result["actions"][0]["rationale"] == "美元暴露较高"
+
+
+def test_transaction_analysis_skill_wraps_json_array_response() -> None:
+    skill = TransactionAnalysisSkill(ai_client=StubAIClient('[{"recommendation":"核对重复交易"}]'))
+
+    result = skill.execute({"transactions": [{"asset_code": "USD", "quantity": 1000}]})
+
+    assert result["items"][0]["recommendation"] == "核对重复交易"
+
+
 def test_risk_assessment_skill() -> None:
     ai_payload = {
         "risk_level": "medium",

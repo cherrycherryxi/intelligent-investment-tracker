@@ -11,6 +11,7 @@ from urllib import error, request
 
 from investment_tracker.mcp_tools.base import ToolExecutionError
 from investment_tracker.settings import AppSettings, get_settings
+from investment_tracker.utils.agent_run_logger import log_agent_event
 
 
 @dataclass
@@ -103,19 +104,54 @@ class AIClient:
             temperature=resolved_temperature,
             max_tokens=resolved_max_tokens,
         )
+        log_agent_event(
+            "AI request prepared",
+            data={
+                "provider": resolved_provider,
+                "model": resolved_model,
+                "url": url,
+                "temperature": resolved_temperature,
+                "max_tokens": resolved_max_tokens,
+                "timeout_seconds": request_timeout,
+                "input_tokens_estimate": input_tokens,
+                "token_budget": self.token_budget,
+                "payload": payload,
+            },
+        )
 
         last_error: Optional[ToolExecutionError] = None
         for attempt in range(self.max_retries):
             try:
+                log_agent_event(
+                    "AI request attempt",
+                    data={"attempt": attempt + 1, "max_retries": self.max_retries, "provider": resolved_provider},
+                )
                 raw_response = self.transport.post_json(url=url, headers=headers, payload=payload, timeout=request_timeout)
-                return self._parse_response(
+                response = self._parse_response(
                     provider=resolved_provider,
                     model=resolved_model,
                     raw_response=raw_response,
                     input_tokens=input_tokens,
                 )
+                log_agent_event(
+                    "AI response received",
+                    data={
+                        "provider": response.provider,
+                        "model": response.model,
+                        "input_tokens": response.input_tokens,
+                        "output_tokens": response.output_tokens,
+                        "raw_response": raw_response,
+                    },
+                    content=response.content,
+                    language="text",
+                )
+                return response
             except ToolExecutionError as exc:
                 last_error = exc
+                log_agent_event(
+                    "AI request error",
+                    data={"attempt": attempt + 1, "code": exc.code, "message": str(exc), "details": exc.details},
+                )
             except error.URLError as exc:  # pragma: no cover - network path
                 last_error = ToolExecutionError(
                     "AI provider request failed",
@@ -123,12 +159,20 @@ class AIClient:
                     details={"reason": str(exc.reason)},
                     retryable=True,
                 )
+                log_agent_event(
+                    "AI request error",
+                    data={"attempt": attempt + 1, "code": last_error.code, "details": last_error.details},
+                )
             except (socket.timeout, TimeoutError) as exc:  # pragma: no cover - network path
                 last_error = ToolExecutionError(
                     "AI provider request timed out",
                     code="ai_request_timeout",
                     details={"timeout_seconds": request_timeout, "reason": str(exc)},
                     retryable=True,
+                )
+                log_agent_event(
+                    "AI request error",
+                    data={"attempt": attempt + 1, "code": last_error.code, "details": last_error.details},
                 )
 
             if last_error and (not last_error.retryable or attempt == self.max_retries - 1):

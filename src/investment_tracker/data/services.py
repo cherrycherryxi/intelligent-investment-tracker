@@ -365,6 +365,8 @@ class PortfolioEventService:
             return
         if event.event_type == EventType.FX_BUY:
             self._create_fx_buy_lots(user_id=user_id, event=event, cash_entries=cash_entries)
+        elif event.event_type == EventType.FX_SELL:
+            self._consume_fx_sell_lots(user_id=user_id, event=event, cash_entries=cash_entries)
         elif event.event_type == EventType.FX_SWAP:
             self._create_fx_swap_lots(user_id=user_id, event=event, cash_entries=cash_entries)
         elif event.event_type in {
@@ -407,6 +409,26 @@ class PortfolioEventService:
                 source_event_id=event.id,
                 source_type=FundingSourceType.FX_BUY,
                 created_at=event.event_time,
+            )
+
+    def _consume_fx_sell_lots(
+        self,
+        *,
+        user_id: int,
+        event: PortfolioEvent,
+        cash_entries: List[CashLedgerEntry],
+    ) -> None:
+        manager = FundingLotManager(self.session)
+        allocation_engine = LotAllocationEngine(self.session, lot_manager=manager)
+        for entry in cash_entries:
+            if entry.currency == "CNY" or Decimal(str(entry.amount_delta)) >= 0:
+                continue
+            allocation_engine.allocate(
+                user_id=user_id,
+                currency=entry.currency,
+                amount_needed=abs(Decimal(str(entry.amount_delta))),
+                consuming_event_id=event.id,
+                allocation_time=event.event_time,
             )
 
     def _create_fx_swap_lots(
@@ -1389,11 +1411,13 @@ class PerformanceService:
                 net_invested_cny -= amount
 
         asset_quantities = self._asset_quantities(user_id=user_id)
+        raw_asset_quantities = self._raw_asset_quantities(user_id=user_id)
         assets_by_id = {asset.id: asset for asset in self.session.query(Asset).all()}
         valuations, missing_valuations = self._latest_valuations(
             user_id=user_id,
             cutoff=cutoff,
             asset_quantities=asset_quantities,
+            raw_asset_quantities=raw_asset_quantities,
             assets_by_id=assets_by_id,
         )
         open_asset_currencies = {
@@ -1408,6 +1432,14 @@ class PerformanceService:
         total_assets_cny = Decimal("0")
         investment_pnl_cny = Decimal("0")
         asset_type_totals: Dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+        realized_investment = self._closed_amount_valued_realized_investment_pnl(
+            user_id=user_id,
+            cutoff=cutoff,
+            asset_quantities=asset_quantities,
+            raw_asset_quantities=raw_asset_quantities,
+            valuations=valuations,
+            assets_by_id=assets_by_id,
+        )
 
         asset_value_by_currency: Dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
         for asset_id, valuation in valuations.items():
@@ -1492,6 +1524,8 @@ class PerformanceService:
 
         total_pnl_cny = total_assets_cny - net_invested_cny
         fx_pnl_cny = total_pnl_cny - investment_pnl_cny
+        realized_investment_pnl_cny = realized_investment["total_cny"]
+        unrealized_investment_pnl_cny = investment_pnl_cny - realized_investment_pnl_cny
 
         by_asset_type = []
         for asset_type, value in sorted(asset_type_totals.items()):
@@ -1512,6 +1546,8 @@ class PerformanceService:
                 "total_pnl_cny": self._to_float(total_pnl_cny, "0.01"),
                 "total_return_pct": self._to_float((total_pnl_cny / net_invested_cny * 100) if net_invested_cny else Decimal("0"), "0.0001"),
                 "investment_pnl_cny": self._to_float(investment_pnl_cny, "0.01"),
+                "realized_investment_pnl_cny": self._to_float(realized_investment_pnl_cny, "0.01"),
+                "unrealized_investment_pnl_cny": self._to_float(unrealized_investment_pnl_cny, "0.01"),
                 "fx_pnl_cny": self._to_float(fx_pnl_cny, "0.01"),
                 "investment_pnl_ratio": self._to_float((investment_pnl_cny / total_pnl_cny * 100) if total_pnl_cny else Decimal("0"), "0.0001"),
                 "fx_pnl_ratio": self._to_float((fx_pnl_cny / total_pnl_cny * 100) if total_pnl_cny else Decimal("0"), "0.0001"),
@@ -1522,8 +1558,90 @@ class PerformanceService:
                 "missing_rates": sorted(set(missing_rates)),
                 "missing_valuations": missing_valuations,
                 "estimated_values": estimated_values,
+                "realized_closed_positions": realized_investment["entries"],
             },
         }
+
+    def _closed_amount_valued_realized_investment_pnl(
+        self,
+        *,
+        user_id: int,
+        cutoff: datetime,
+        asset_quantities: Optional[Dict[int, Decimal]] = None,
+        raw_asset_quantities: Optional[Dict[int, Decimal]] = None,
+        valuations: Optional[Dict[int, ValuationSnapshot]] = None,
+        assets_by_id: Optional[Dict[int, Asset]] = None,
+    ) -> Dict[str, Any]:
+        asset_quantities = asset_quantities or self._asset_quantities(user_id=user_id)
+        raw_asset_quantities = raw_asset_quantities or self._raw_asset_quantities(user_id=user_id)
+        assets_by_id = assets_by_id or {asset.id: asset for asset in self.session.query(Asset).all()}
+        if valuations is None:
+            valuations, _ = self._latest_valuations(
+                user_id=user_id,
+                cutoff=cutoff,
+                asset_quantities=asset_quantities,
+                raw_asset_quantities=raw_asset_quantities,
+                assets_by_id=assets_by_id,
+            )
+        buy_native_by_asset: Dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
+        sell_native_by_asset: Dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
+        rows = (
+            self.session.query(AssetLedgerEntry)
+            .join(PortfolioEvent, PortfolioEvent.id == AssetLedgerEntry.event_id)
+            .filter(AssetLedgerEntry.user_id == user_id, PortfolioEvent.event_time <= cutoff)
+            .all()
+        )
+        for row in rows:
+            asset = assets_by_id.get(row.asset_id)
+            if asset is None or asset.asset_type not in self.AMOUNT_VALUED_ASSET_TYPES:
+                continue
+            if row.cash_amount is None:
+                continue
+            cash_amount = abs(Decimal(str(row.cash_amount)))
+            if Decimal(str(row.quantity_delta)) > 0:
+                buy_native_by_asset[row.asset_id] += cash_amount
+            elif Decimal(str(row.quantity_delta)) < 0:
+                sell_native_by_asset[row.asset_id] += cash_amount
+
+        entries: List[Dict[str, Any]] = []
+        total_cny = Decimal("0")
+        for asset_id, sell_native in sorted(sell_native_by_asset.items()):
+            asset = assets_by_id.get(asset_id)
+            if asset is None:
+                continue
+            if asset_quantities.get(asset_id, Decimal("0")) != 0:
+                continue
+            valuation = valuations.get(asset_id)
+            if (
+                asset.asset_type in self.AMOUNT_VALUED_ASSET_TYPES
+                and valuation is not None
+                and raw_asset_quantities.get(asset_id, Decimal("0")) < 0
+                and (Decimal(str(valuation.quantity)) > 0 or Decimal(str(valuation.market_value)) > 0)
+            ):
+                continue
+            buy_native = buy_native_by_asset[asset_id]
+            if buy_native == 0:
+                continue
+            realized_native = sell_native - buy_native
+            rate = self._rate_for_currency(asset.currency, valuation_time=cutoff)
+            if rate is None:
+                continue
+            realized_cny = realized_native * rate
+            total_cny += realized_cny
+            entries.append(
+                {
+                    "asset_id": asset.id,
+                    "asset_code": asset.asset_code,
+                    "asset_name": asset.asset_name,
+                    "currency": asset.currency,
+                    "buy_native": self._to_float(buy_native, "0.000001"),
+                    "sell_native": self._to_float(sell_native, "0.000001"),
+                    "realized_investment_pnl_native": self._to_float(realized_native, "0.000001"),
+                    "realized_investment_pnl_cny": self._to_float(realized_cny, "0.01"),
+                    "fx_rate_to_cny": self._to_float(rate, "0.000001"),
+                }
+            )
+        return {"total_cny": total_cny, "entries": entries}
 
     def _asset_quantities(self, *, user_id: int) -> Dict[int, Decimal]:
         quantities: Dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
@@ -1544,12 +1662,25 @@ class PerformanceService:
             quantities[row.asset_id] += delta
         return quantities
 
+    def _raw_asset_quantities(self, *, user_id: int) -> Dict[int, Decimal]:
+        quantities: Dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
+        rows = (
+            self.session.query(AssetLedgerEntry)
+            .join(PortfolioEvent, PortfolioEvent.id == AssetLedgerEntry.event_id)
+            .filter(AssetLedgerEntry.user_id == user_id)
+            .all()
+        )
+        for row in rows:
+            quantities[row.asset_id] += Decimal(str(row.quantity_delta))
+        return quantities
+
     def _latest_valuations(
         self,
         *,
         user_id: int,
         cutoff: datetime,
         asset_quantities: Dict[int, Decimal],
+        raw_asset_quantities: Optional[Dict[int, Decimal]] = None,
         assets_by_id: Optional[Dict[int, Asset]] = None,
     ) -> Tuple[Dict[int, ValuationSnapshot], List[Dict[str, Any]]]:
         rows = (
@@ -1558,12 +1689,24 @@ class PerformanceService:
             .order_by(ValuationSnapshot.valuation_time.desc(), ValuationSnapshot.id.desc())
             .all()
         )
+        raw_asset_quantities = raw_asset_quantities or {}
+        assets_by_id = assets_by_id or {asset.id: asset for asset in self.session.query(Asset).all()}
         latest: Dict[int, ValuationSnapshot] = {}
         for row in rows:
+            asset = assets_by_id.get(row.asset_id)
+            has_positive_snapshot = Decimal(str(row.quantity)) > 0 or Decimal(str(row.market_value)) > 0
+            is_open_by_ledger = asset_quantities.get(row.asset_id, Decimal("0")) != 0
+            is_open_by_amount_snapshot = (
+                asset is not None
+                and asset.asset_type in self.AMOUNT_VALUED_ASSET_TYPES
+                and raw_asset_quantities.get(row.asset_id, Decimal("0")) < 0
+                and has_positive_snapshot
+            )
+            if not is_open_by_ledger and not is_open_by_amount_snapshot:
+                continue
             if row.asset_id not in latest:
                 latest[row.asset_id] = row
 
-        assets_by_id = assets_by_id or {asset.id: asset for asset in self.session.query(Asset).all()}
         missing = []
         for asset_id, quantity in asset_quantities.items():
             if quantity == 0 or asset_id in latest:
